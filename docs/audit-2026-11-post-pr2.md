@@ -278,6 +278,9 @@ JSON stayed parseable in every failure mode tested.
 ## 7. Tooling verification
 
 ```
+GitHub Actions (Linux)            → 3.11 pass, 3.12 pass, 3.13 pass
+                                    (lint, format, coverage gate, wheel smoke,
+                                     sdist smoke, backup round trip)
 ruff check src/ tests/            → All checks passed
 ruff format --check src/ tests/   → 74 files already formatted
 pytest                            → 396 passed
@@ -340,8 +343,8 @@ Why not beta or 1.0 yet:
 
 Conditions for a `0.2.0` publication (maintainer actions):
 
-1. CI green on Python 3.11, 3.12 and 3.13 (the workflow exists; this audit only
-   ran 3.11 locally).
+1. ~~CI green on Python 3.11, 3.12 and 3.13~~ — observed on 2026-11-21 (run
+   44947121842), including the wheel/sdist smoke tests and backup round trip.
 2. Tag `v0.2.0`, build from a clean checkout, publish wheel + sdist, and verify
    `pip install forgekit==0.2.0` in an empty environment.
 3. Confirm GitHub private vulnerability reporting is enabled and the contact in

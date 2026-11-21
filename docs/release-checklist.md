@@ -34,13 +34,16 @@ specific environment; the environment and date are recorded next to it. See
       `docs/backup-safety.md` and `docs/platform-support.md`.
 - [x] Changelog updated for 0.2.0; release level decided (public alpha).
 
+## Verified in CI (Linux, 2026-11-21, run 44947121842 on PR #3)
+
+- [x] CI green on Python 3.11 (1m10s), 3.12 (1m32s) and 3.13 (1m17s).
+- [x] Wheel smoke test, sdist smoke test and backup create/verify/restore round
+      trip all ran and passed inside those jobs.
+
 ## Not yet verified — required before publishing or claiming more support
 
-- [ ] CI green on Linux with Python 3.11, 3.12 and 3.13 (workflow updated, but
-      this audit only ran Python 3.11 locally; 3.12/3.13 must be observed in CI).
-- [ ] CI green for the wheel smoke test, sdist smoke test and backup round-trip
-      step (added in this audit, must run at least once in CI).
-- [ ] `Platforms (experimental)` macOS workflow observed; results recorded. It is
+- [ ] `Platforms (experimental)` macOS workflow completed. It was started but had
+      not been allocated a runner within the audit window (status: queued). It is
       non-blocking and does **not** imply macOS support.
 - [ ] Real package-manager behaviour verified beyond apt (dnf, pacman, zypper, apk,
       brew) on real systems. Current coverage there is mocked.

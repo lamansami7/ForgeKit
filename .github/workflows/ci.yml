@@ -30,7 +30,24 @@ jobs:
           ruff check src/ tests/
           ruff format --check src/ tests/
       - name: Test with coverage
-        run: pytest --cov=forgekit --cov-report=term-missing
+        run: pytest --cov=forgekit --cov-report=term-missing --junitxml="$RUNNER_TEMP/forge-pytest.xml"
+      - name: Annotate failing tests
+        if: failure()
+        run: |
+          python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          report = Path(os.environ["RUNNER_TEMP"]) / "forge-pytest.xml"
+          if report.is_file():
+              for case in ET.parse(report).iter("testcase"):
+                  for failure in (*case.findall("failure"), *case.findall("error")):
+                      detail = failure.text or failure.get("message", "Test failed")
+                      message = f"{case.get('classname')}.{case.get('name')}: {detail}"[:3000]
+                      message = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                      print(f"::error title=pytest::{message}")
+          PY
       - name: Build wheel and source distribution
         run: python -m build
       - name: Install wheel in an isolated environment and smoke-test

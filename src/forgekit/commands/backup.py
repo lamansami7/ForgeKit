@@ -7,6 +7,7 @@ import typer
 
 from forgekit.output import create_table, get_console, print_json
 from forgekit.services.backup_service import (
+    RestoreError,
     create_backup,
     list_archive,
     restore_archive,
@@ -128,6 +129,26 @@ def restore_cmd(
             if sys.stdin.isatty():
                 typer.confirm(f"Restore {archive} to {destination}?", abort=True)
         result = restore_archive(Path(archive), Path(destination), dry_run=dry_run, overwrite=force)
+    except RestoreError as exc:
+        if json:
+            print_json(
+                {
+                    "error": str(exc),
+                    "rolled_back": exc.rolled_back,
+                    "rollback_errors": exc.rollback_errors,
+                }
+            )
+        else:
+            if exc.rolled_back:
+                console.print(
+                    "[yellow]Restore failed; destination rolled back to its previous state.[/yellow]"
+                )
+            else:
+                console.print(
+                    "[red]Restore failed and rollback was incomplete — inspect the destination.[/red]"
+                )
+            console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
     except (OSError, ValueError, EOFError, tarfile.TarError) as exc:
         _fail(f"Restore failed: {exc}", json)
     if json:
@@ -145,5 +166,10 @@ def restore_cmd(
         console.print(
             f"[green]✓ Restored {result['restored']} entries to {result['destination']}[/green]"
         )
+        if result.get("overwritten"):
+            console.print(
+                f"[dim]Replaced {result['overwritten']} existing file(s); originals were removed "
+                "after the restore completed successfully.[/dim]"
+            )
     if result["status"] == "needs_confirmation":
         raise typer.Exit(1)

@@ -60,7 +60,7 @@ def _show_packages(as_json: bool) -> None:
 
 @app.command("list")
 def list_cmd(
-    manager: str = typer.Option(None, "--manager", "-m", help="Package manager name"),
+    manager: str | None = typer.Option(None, "--manager", "-m", help="Package manager name"),
     limit: int = typer.Option(20, "--limit", "-n", help="Limit results", min=1, max=100),
     json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ) -> None:
@@ -96,7 +96,7 @@ def list_cmd(
 
 @app.command("updates")
 def updates_cmd(
-    manager: str = typer.Option(None, "--manager", "-m", help="Package manager"),
+    manager: str | None = typer.Option(None, "--manager", "-m", help="Package manager"),
     json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ) -> None:
     """Check for available updates."""

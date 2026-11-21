@@ -14,7 +14,7 @@ src/forgekit/
   utils.py            — format_bytes, run_command, which, redact_url
   platform.py         — OS detection, user/hostname
   logging.py          — setup
-  core/               — runner context, checks, permissions, environment
+  core/               — permission helpers
   services/           — business logic (system, network, git, filesystem, package, security, backup, developer)
   models/             — dataclass models with to_dict()
   commands/           — Typer sub-apps (system, net, git, files, packages, dev, security, backup, workspace, doctor, dashboard, info, config)
@@ -27,7 +27,8 @@ src/forgekit/
 - **Linux-first, cross-platform aware** — `platform.py` abstracts OS; commands explain when unsupported.
 - **Services vs Commands** — Services encapsulate testable I/O and business logic; commands handle arguments and rendering.
 - **Safe defaults** — read-only scans, no auto-delete, overwrite protection, credential redaction.
-- **Machine output** — supported `--json` commands return JSON without Rich markup; argument-parser errors remain human-readable.
+- **Machine output** — supported `--json` commands return JSON without Rich markup; diagnostics go to stderr; argument-parser errors are JSON when `--json` is explicit.
+- **Undo over hope** — backup restore journals destination changes and rolls them back when a member fails.
 - **Mocks in tests** — network/hardware/package managers mocked; no internet/root needed.
 
 ## Adding a Command

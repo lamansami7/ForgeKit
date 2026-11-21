@@ -1,0 +1,35 @@
+name: Platforms (experimental)
+
+# ForgeKit is Linux-first. This workflow collects an early, informational signal
+# for macOS; it is intentionally non-blocking and does NOT mean macOS is
+# supported. See docs/platform-support.md for the validation status.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: macOS / Python 3.12 (experimental, non-blocking)
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - name: Test
+        run: pytest -q
+      - name: Self-diagnostics
+        run: forge doctor

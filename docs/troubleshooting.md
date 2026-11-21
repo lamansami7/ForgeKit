@@ -25,6 +25,19 @@
 - Use `--dry-run` to preview, `--force` to confirm overwrite.
 - Unsafe paths, symlinks, hard links and special archive entries are rejected. Restore requires POSIX no-follow, directory-relative filesystem operations; it is not available on every platform.
 
+## Restore failed and I do not know the destination state
+- Read the error: `rolled_back: true` means the destination was returned to its previous state; `rolled_back: false` means some items could not be undone and the message lists which ones.
+- If the process was killed (SIGKILL) or the machine lost power, look for `.forgekit-restore-<random>` in the destination root. It holds the original files that were being replaced; rename them back if you prefer the originals.
+- Verify the archive again before retrying: `forge backup verify ARCHIVE --sha256 DIGEST`.
+- See [backup safety](backup-safety.md) for the full recovery procedure.
+
+## `forge config init` says the configuration already exists
+- It never overwrites silently. Inspect the file with `forge config show`, then either edit it or run `forge config init --force` explicitly.
+
+## A command succeeds but I expected diagnostics on stdout
+- `--verbose`/`-v` logs to stderr by design so JSON on stdout stays valid. Redirect if needed: `forge --verbose system 2>debug.log`.
+- Pipeline JSON is unchanged by logging; if you see log text mixed into JSON, that is a bug — please report it.
+
 ## Dashboard flicker or high CPU
 - Increase refresh: `forge dashboard --refresh 3`
 - Set in config: `forge config set dashboard.refresh_interval 3.0`

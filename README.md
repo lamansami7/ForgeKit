@@ -25,6 +25,8 @@
 
 ForgeKit is an early-stage, terminal-native toolkit designed for Linux first. macOS and Windows are experimental and have not been validated to the same extent. Do not treat this pre-1.0 software as production-ready.
 
+**Current status: 0.2.0, public alpha.** Linux is the only validated platform; see the [post-PR2 audit](docs/audit-2026-11-post-pr2.md) for exactly what was verified, what remains limited, and why this is an alpha rather than a beta.
+
 | Area | Commands | Description |
 |------|----------|-------------|
 | **System** | `forge system` | OS, CPU, memory, disk, processes — real `psutil` data |
@@ -34,13 +36,13 @@ ForgeKit is an early-stage, terminal-native toolkit designed for Linux first. ma
 | **Packages** | `forge packages` | Detect apt/dnf/pacman/apk/brew, check updates (read-only) |
 | **Developer** | `forge dev` | Detect Python/Node/Go/Docker/etc. + PATH diagnostics |
 | **Security** | `forge security` | Non-invasive checks — SSH perms, world-writable, firewall, risky configs |
-| **Backup** | `forge backup` | Create/verify/restore compressed archives with safety guards |
+| **Backup** | `forge backup` | Create/verify/restore compressed archives; restore is journaled and rolls back on failure |
 | **Workspace** | `forge workspace` | Scaffold Python/Node/generic projects with .gitignore templates |
 | **Doctor** | `forge doctor` | Self-diagnostics — Python, deps, config, platform |
 | **Dashboard** | `forge dashboard` | Live Rich terminal dashboard |
 | **Config** | `forge config` | TOML config at `~/.config/forgekit/config.toml` |
 
-Commands provide `--help` and, where supported, `--json` for piping. A global `forge --json` also selects JSON for commands that support it. Explicit `--json` also produces JSON for argument and early configuration errors; configuration-only JSON has limitations before configuration is loaded. Backup and workspace operations write files; `--force` explicitly permits overwriting existing regular files.
+Commands provide `--help` and, where supported, `--json` for piping, with diagnostics on stderr so JSON stays clean. A global `forge --json` also selects JSON for commands that support it. Explicit `--json` also produces JSON for argument and early configuration errors; configuration-only JSON has limitations before configuration is loaded. Backup and workspace operations write files; `--force` explicitly permits overwriting existing regular files.
 
 ---
 
@@ -212,10 +214,14 @@ Do not store secrets in this configuration file. Invalid TOML, unknown keys and 
 - [Installation](docs/installation.md)
 - [Commands](docs/commands.md)
 - [Configuration](docs/configuration.md)
+- [Backup safety and recovery](docs/backup-safety.md)
+- [Platform support](docs/platform-support.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Architecture](docs/architecture.md)
 - [Examples](docs/examples.md)
-- [Release checklist](docs/release-checklist.md)
+- [Testing](docs/testing.md)
+- [Release checklist](docs/release-checklist.md) and [release procedure](docs/release-procedure.md)
+- [Post-PR2 audit](docs/audit-2026-11-post-pr2.md)
 
 ---
 
@@ -223,13 +229,13 @@ Do not store secrets in this configuration file. Invalid TOML, unknown keys and 
 
 ```bash
 pip install -e ".[dev]"
-pytest -v
-pytest --cov=src/forgekit --cov-report=term-missing
+pytest
+pytest --cov=forgekit --cov-report=term-missing   # gate: 90% statements
 ruff check src/ tests/
 ruff format --check src/ tests/
 ```
 
-Tests use temporary directories and mocks for external network and package-manager behavior; no internet or root is required. Tests do not modify system configuration.
+The suite currently runs 396 tests at 91% statement coverage on Linux/Python 3.11. Tests use temporary directories and mocks for external network and package-manager behavior; no internet or root is required, and the developer's real configuration is never read or written. See [docs/testing.md](docs/testing.md).
 
 ---
 
@@ -241,7 +247,8 @@ Tests use temporary directories and mocks for external network and package-manag
 - **Credential redaction** — URL userinfo, query values and common sensitive HTTP headers are masked in diagnostic output; review output before sharing because arbitrary secrets cannot be recognized reliably.
 - **No root required** — works without elevated privileges; explains when info is limited.
 - **Non-invasive security checks** — limited heuristics, not vulnerability verification. Network checks contact the user-specified host or the documented connectivity endpoints.
-- **Backup restrictions** — source symlinks and special files, and archive links and special entries, are refused; creation streams data, while restore first makes a private temporary archive snapshot. Restore is available only where the OS provides the required directory-relative, no-follow operations. See [backup safety](docs/commands.md#backup).
+- **Backup restrictions** — source symlinks and special files, and archive links and special entries, are refused; creation streams data and publishes atomically, while restore verifies a private snapshot before writing. Restore journals replacements and rolls back when a member fails, but it is not crash-atomic and does not restore ownership, ACLs or timestamps. It is available only where the OS provides the required directory-relative, no-follow operations. See [backup safety](docs/backup-safety.md).
+- **No telemetry** — ForgeKit sends no analytics, crash reports or update pings; it contacts only the hosts you ask it to, plus the documented connectivity endpoints. Details in [SECURITY.md](SECURITY.md).
 
 See [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
 
@@ -254,7 +261,7 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md), [CODE_OF_CONDU
 ```bash
 git checkout -b feat/my-feature
 # make changes + tests
-ruff check src/ && pytest
+ruff check src/ tests/ && ruff format --check src/ tests/ && pytest
 git push && open PR
 ```
 

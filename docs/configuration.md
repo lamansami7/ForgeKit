@@ -58,3 +58,5 @@ forge config set files.exclude_dirs ".git,.venv,node_modules"
 - `config set` preserves comments, refuses unknown keys and symlink config files, and writes atomically with mode 0600 on POSIX. `config init --force` explicitly replaces the file.
 - `general.output_format=json` enables JSON by default; `--json` overrides the default. `general.colors=false`, `general.output_format=plain`, `--no-color`, or `NO_COLOR` disables colors (plain retains table layout).
 - The dashboard uses its refresh and visibility settings; file exclusions and size threshold, backup destination/compression, network timeouts, and system warning thresholds are configurable.
+- `general.log_level` sets the `forgekit` logger level (DEBUG/INFO/WARNING/ERROR/CRITICAL). `--verbose` overrides it with DEBUG for one run. Log output goes to stderr so `--json` stays parseable.
+- Configuration files are refused if they are symlinks, and changes are published atomically: a crash or concurrent reader never sees a half-written file.

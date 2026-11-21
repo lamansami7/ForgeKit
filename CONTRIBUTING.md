@@ -23,9 +23,12 @@ forge doctor
 ```bash
 ruff check src/ tests/
 ruff format --check src/ tests/
-pytest --cov=forgekit --cov-report=term-missing
+pytest --cov=forgekit --cov-report=term-missing   # gate: 90% statements
 python -m build
 ```
+
+See [docs/testing.md](docs/testing.md) for the test layout, mocking rules and
+coverage policy.
 
 5. Push and open a Pull Request against `main`.
 
@@ -36,7 +39,11 @@ python -m build
 - All commands must work or explain why they are unsupported (platform-aware). Linux is the primary target; do not claim untested macOS or Windows support.
 - Use Rich tables/panels for terminal output and provide `--json` where useful.
 - Keep commands consistent: `--help`, `--json`, proper exit codes.
-- Add docs to `docs/` if you change behavior.
+- Add docs to `docs/` if you change behavior. Safety-relevant changes belong in
+  [backup safety](docs/backup-safety.md), [platform support](docs/platform-support.md)
+  or `SECURITY.md` as appropriate.
+- New tests must assert behaviour; coverage is a floor, not the goal.
+- Do not claim support for a platform you have not run the suite on.
 
 ## Commit Messages
 

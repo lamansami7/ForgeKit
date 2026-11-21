@@ -9,7 +9,7 @@ TOOL_CHECKS = {
     "git": {"cmd": "git", "version_args": ["--version"]},
     "node": {"cmd": "node", "version_args": ["--version"]},
     "npm": {"cmd": "npm", "version_args": ["--version"]},
-    "java": {"cmd": "java", "version_args": ["--version"]},
+    "java": {"cmd": "java", "version_args": ["--version"], "fallback_args": ["-version"]},
     "gcc": {"cmd": "gcc", "version_args": ["--version"]},
     "clang": {"cmd": "clang", "version_args": ["--version"]},
     "docker": {"cmd": "docker", "version_args": ["--version"]},
@@ -43,20 +43,22 @@ def check_tool(name: str, spec: dict[str, object]) -> dict[str, object]:
         }
 
     version: str | None = None
+    details: str | None = None
     try:
-        args = spec.get("version_args", ["--version"])  # type: ignore
-        r = subprocess.run([cmd, *args], capture_output=True, text=True, timeout=5)  # type: ignore
-        out = (r.stdout or r.stderr or "").strip().splitlines()
-        if out:
-            version = out[0][:150]
-    except Exception as e:
-        version = f"error: {e}"
-
-    # Additional PATH check
-    details = None
-    if version and "not found" not in version.lower():
-        details = "OK"
-
+        args = spec.get("version_args", ["--version"])
+        r = subprocess.run([path, *args], capture_output=True, text=True, timeout=5)
+        if r.returncode and spec.get("fallback_args"):
+            r = subprocess.run(
+                [path, *spec["fallback_args"]], capture_output=True, text=True, timeout=5
+            )
+        lines = (r.stdout or r.stderr or "").strip().splitlines()
+        if r.returncode == 0:
+            version = lines[0][:150] if lines else None
+            details = "OK" if version else "Version output was empty"
+        else:
+            details = f"Version command failed (exit {r.returncode})"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        details = f"Version unavailable: {type(exc).__name__}"
     return {"name": label, "found": True, "path": path, "version": version, "details": details}
 
 

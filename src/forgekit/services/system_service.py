@@ -19,7 +19,7 @@ from forgekit.models.system_info import (
 from forgekit.platform import get_current_user, get_hostname
 
 
-def get_cpu_info() -> CpuInfo:
+def get_cpu_info(per_core: bool = False) -> CpuInfo:
     # CPU model
     model = platform.processor() or platform.machine() or "Unknown"
     # Try /proc/cpuinfo on Linux for better model name
@@ -33,10 +33,11 @@ def get_cpu_info() -> CpuInfo:
         except Exception:
             pass
 
-    physical = psutil.cpu_count(logical=False) or 1
-    logical = psutil.cpu_count(logical=True) or 1
-    usage = psutil.cpu_percent(interval=0.5)
-    per_core = psutil.cpu_percent(interval=0.3, percpu=True) or []
+    physical = psutil.cpu_count(logical=False)
+    logical = psutil.cpu_count(logical=True)
+    # A blocking sample is meaningful even on the first invocation.
+    usage = psutil.cpu_percent(interval=0.25)
+    core_usage = psutil.cpu_percent(interval=0.25, percpu=True) if per_core else []
 
     freq = None
     freq_current = None
@@ -45,9 +46,9 @@ def get_cpu_info() -> CpuInfo:
     try:
         freq = psutil.cpu_freq()
         if freq:
-            freq_current = freq.current
-            freq_min = freq.min
-            freq_max = freq.max
+            freq_current = freq.current if freq.current > 0 else None
+            freq_min = freq.min if freq.min > 0 else None
+            freq_max = freq.max if freq.max > 0 else None
     except Exception:
         pass
 
@@ -57,7 +58,7 @@ def get_cpu_info() -> CpuInfo:
         physical_cores=physical,
         logical_cores=logical,
         usage_percent=round(usage, 1),
-        per_core_percent=[round(x, 1) for x in per_core],
+        per_core_percent=[round(x, 1) for x in core_usage],
         frequency_current_mhz=freq_current,
         frequency_min_mhz=freq_min,
         frequency_max_mhz=freq_max,
@@ -70,7 +71,7 @@ def get_memory_info() -> MemoryInfo:
     return MemoryInfo(
         total=vm.total,
         available=vm.available,
-        used=vm.used,
+        used=vm.total - vm.available,
         free=vm.free,
         percent=vm.percent,
         swap_total=swap.total,
@@ -79,6 +80,7 @@ def get_memory_info() -> MemoryInfo:
         swap_percent=swap.percent,
         swap_sin=getattr(swap, "sin", None),
         swap_sout=getattr(swap, "sout", None),
+        raw_used=vm.used,
     )
 
 
@@ -103,55 +105,79 @@ def get_disk_info() -> DiskInfo:
                 continue
     except Exception:
         pass
+    # Containers can omit their overlay root even when other mounts are listed.
+    root = Path.cwd().anchor or os.path.sep
+    if not any(part.mountpoint == root for part in partitions):
+        try:
+            usage = psutil.disk_usage(root)
+            partitions.append(
+                DiskPartitionInfo(
+                    device="unknown",
+                    mountpoint=root,
+                    fstype="unknown",
+                    total=usage.total,
+                    used=usage.used,
+                    free=usage.free,
+                    percent=usage.percent,
+                )
+            )
+        except OSError:
+            pass
     return DiskInfo(partitions=partitions)
 
 
 def get_processes(limit: int = 10, sort_by: str = "cpu") -> list[ProcessInfo]:
-    procs: list[ProcessInfo] = []
-    for p in psutil.process_iter(
-        [
-            "pid",
-            "name",
-            "username",
-            "cpu_percent",
-            "memory_percent",
-            "memory_info",
-            "status",
-            "create_time",
-        ]
-    ):
+    if limit < 1 or sort_by not in ("cpu", "memory"):
+        raise ValueError("Invalid process limit or sorting key")
+    sampled = []
+    attrs = ["pid", "name", "username", "memory_percent", "memory_info", "status", "create_time"]
+    for proc in psutil.process_iter(attrs):
         try:
-            info = p.info
+            proc.cpu_percent(interval=None)  # prime, since the first reading is meaningless
+            sampled.append((proc, True))
+        except psutil.AccessDenied:
+            sampled.append((proc, False))
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            continue
+    if sampled:
+        time.sleep(0.25)
+    procs: list[ProcessInfo] = []
+    for proc, primed in sampled:
+        try:
+            info = proc.info
+            try:
+                cpu_percent = proc.cpu_percent(interval=None) if primed else None
+            except psutil.AccessDenied:
+                cpu_percent = None
             mem_info = info.get("memory_info")
-            rss = mem_info.rss if mem_info else 0
             procs.append(
                 ProcessInfo(
                     pid=info["pid"],
                     name=info.get("name") or "unknown",
                     username=info.get("username"),
-                    cpu_percent=info.get("cpu_percent") or 0.0,
-                    memory_percent=info.get("memory_percent") or 0.0,
-                    memory_rss=rss,
+                    cpu_percent=cpu_percent,
+                    memory_percent=info.get("memory_percent"),
+                    memory_rss=mem_info.rss if mem_info else None,
                     status=info.get("status") or "unknown",
                     create_time=info.get("create_time"),
                 )
             )
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
-    # CPU percent needs previous call; trigger measurement
-    # Already have cpu_percent but may be 0.0 if first call; sort anyway
-    if sort_by == "memory":
-        procs.sort(key=lambda x: x.memory_percent, reverse=True)
-    else:
-        procs.sort(key=lambda x: x.cpu_percent, reverse=True)
+    key = (
+        (lambda p: p.memory_percent if p.memory_percent is not None else -1)
+        if sort_by == "memory"
+        else (lambda p: p.cpu_percent if p.cpu_percent is not None else -1)
+    )
+    procs.sort(key=key, reverse=True)
     return procs[:limit]
 
 
-def get_uptime() -> float:
+def get_uptime() -> float | None:
     try:
         return time.time() - psutil.boot_time()
     except Exception:
-        return 0.0
+        return None
 
 
 def get_load_avg() -> tuple[float, float, float] | None:

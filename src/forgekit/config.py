@@ -2,23 +2,21 @@
 
 from __future__ import annotations
 
+import math
+import os
+import tempfile
 import tomllib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-try:
-    import tomli_w  # type: ignore
-
-    HAS_TOMLI_W = True
-except ImportError:
-    HAS_TOMLI_W = False
+import tomlkit
 
 from forgekit.constants import (
-    DEFAULT_CONFIG_FILE,
     DEFAULT_DASHBOARD_REFRESH,
     DISK_WARNING_THRESHOLD,
 )
+from forgekit.exceptions import ConfigError
 
 DEFAULT_CONFIG_TOML = """# ForgeKit Configuration
 # Location: ~/.config/forgekit/config.toml
@@ -105,119 +103,154 @@ class ForgeConfig:
 
     @classmethod
     def load(cls, path: Path | None = None) -> ForgeConfig:
-        p = path or DEFAULT_CONFIG_FILE
-        if not p.exists():
+        p = resolve_config_path(path)
+        if not p.exists() and not p.is_symlink():
             return cls()
+        if p.is_symlink():
+            raise ConfigError(f"Refusing symbolic-link configuration file: {p}")
         try:
-            with open(p, "rb") as f:
-                data = tomllib.load(f)
-        except Exception:
-            return cls()
+            with p.open("rb") as stream:
+                data = tomllib.load(stream)
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            raise ConfigError(f"Cannot read configuration {p}: {exc}") from exc
         return cls.from_dict(data)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ForgeConfig:
         cfg = cls()
-        if "general" in data:
-            g = data["general"]
-            cfg.general.output_format = g.get("output_format", cfg.general.output_format)
-            cfg.general.colors = g.get("colors", cfg.general.colors)
-            cfg.general.log_level = g.get("log_level", cfg.general.log_level)
-        if "dashboard" in data:
-            d = data["dashboard"]
-            cfg.dashboard.refresh_interval = float(
-                d.get("refresh_interval", cfg.dashboard.refresh_interval)
-            )
-            cfg.dashboard.show_network = d.get("show_network", cfg.dashboard.show_network)
-            cfg.dashboard.show_processes = d.get("show_processes", cfg.dashboard.show_processes)
-        if "thresholds" in data:
-            t = data["thresholds"]
-            cfg.thresholds.cpu_warning = float(t.get("cpu_warning", cfg.thresholds.cpu_warning))
-            cfg.thresholds.memory_warning = float(
-                t.get("memory_warning", cfg.thresholds.memory_warning)
-            )
-            cfg.thresholds.disk_warning = float(t.get("disk_warning", cfg.thresholds.disk_warning))
-        if "backup" in data:
-            b = data["backup"]
-            cfg.backup.default_destination = b.get(
-                "default_destination", cfg.backup.default_destination
-            )
-            cfg.backup.compression = b.get("compression", cfg.backup.compression)
-        if "files" in data:
-            f = data["files"]
-            cfg.files.large_threshold_mb = int(
-                f.get("large_threshold_mb", cfg.files.large_threshold_mb)
-            )
-            cfg.files.exclude_dirs = f.get("exclude_dirs", cfg.files.exclude_dirs)
-        if "network" in data:
-            n = data["network"]
-            cfg.network.ping_timeout = int(n.get("ping_timeout", cfg.network.ping_timeout))
-            cfg.network.http_timeout = int(n.get("http_timeout", cfg.network.http_timeout))
+        defaults = cfg.to_dict()
+        for section, values in data.items():
+            if section not in defaults:
+                raise ConfigError(f"Unknown configuration section: {section}")
+            if not isinstance(values, dict):
+                raise ConfigError(f"Configuration section {section} must be a table")
+            for key, value in values.items():
+                if key not in defaults[section]:
+                    raise ConfigError(f"Unknown configuration key: {section}.{key}")
+                expected = defaults[section][key]
+                valid_type = (
+                    isinstance(value, type(expected))
+                    if not isinstance(expected, float)
+                    else isinstance(value, (int, float)) and not isinstance(value, bool)
+                )
+                if (
+                    isinstance(expected, int)
+                    and not isinstance(expected, bool)
+                    and isinstance(value, bool)
+                ):
+                    valid_type = False
+                if not valid_type:
+                    raise ConfigError(
+                        f"Invalid type for {section}.{key}; expected {type(expected).__name__}"
+                    )
+                setattr(
+                    getattr(cfg, section),
+                    key,
+                    float(value) if isinstance(expected, float) else value,
+                )
         return cfg
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "general": asdict(self.general),
-            "dashboard": asdict(self.dashboard),
-            "thresholds": asdict(self.thresholds),
-            "backup": asdict(self.backup),
-            "files": asdict(self.files),
-            "network": asdict(self.network),
+            section: asdict(getattr(self, section))
+            for section in ("general", "dashboard", "thresholds", "backup", "files", "network")
         }
 
     def validate(self) -> list[str]:
         errors: list[str] = []
         if self.general.output_format not in ("auto", "table", "json", "plain"):
-            errors.append(f"Invalid output_format: {self.general.output_format}")
-        if not (0.5 <= self.dashboard.refresh_interval <= 60):
+            errors.append(f"Invalid general.output_format: {self.general.output_format}")
+        if self.general.log_level not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+            errors.append("general.log_level must be DEBUG, INFO, WARNING, ERROR or CRITICAL")
+        if (
+            not math.isfinite(self.dashboard.refresh_interval)
+            or not 0.5 <= self.dashboard.refresh_interval <= 60
+        ):
             errors.append("dashboard.refresh_interval must be between 0.5 and 60")
-        for k in ("cpu_warning", "memory_warning", "disk_warning"):
-            v = getattr(self.thresholds, k)
-            if not (0 < v <= 100):
-                errors.append(f"thresholds.{k} must be between 0 and 100")
+        for key in ("cpu_warning", "memory_warning", "disk_warning"):
+            value = getattr(self.thresholds, key)
+            if not math.isfinite(value) or not 0 < value <= 100:
+                errors.append(f"thresholds.{key} must be between 0 and 100")
         if self.backup.compression not in ("gz", "bz2", "xz", "none"):
             errors.append("backup.compression must be one of gz, bz2, xz, none")
+        if not self.backup.default_destination:
+            errors.append("backup.default_destination must not be empty")
+        if self.files.large_threshold_mb < 0:
+            errors.append("files.large_threshold_mb must be non-negative")
+        if not all(isinstance(item, str) and item for item in self.files.exclude_dirs):
+            errors.append("files.exclude_dirs must contain non-empty strings")
+        for key in ("ping_timeout", "http_timeout"):
+            if not 1 <= getattr(self.network, key) <= 60:
+                errors.append(f"network.{key} must be between 1 and 60")
         return errors
 
     def save(self, path: Path | None = None) -> Path:
-        p = path or DEFAULT_CONFIG_FILE
-        p.parent.mkdir(parents=True, exist_ok=True)
-        if HAS_TOMLI_W:
-            with open(p, "wb") as f:
-                tomli_w.dump(self.to_dict(), f)
-        else:
-            # Fallback manual TOML writing
-            content = self._to_toml_string()
-            p.write_text(content)
+        p = resolve_config_path(path)
+        errors = self.validate()
+        if errors:
+            raise ConfigError("Invalid configuration: " + "; ".join(errors))
+        try:
+            if p.is_symlink():
+                raise ConfigError(f"Refusing symbolic-link configuration file: {p}")
+            # Preserve comments and existing TOML formatting, never discard user keys.
+            document = (
+                tomlkit.parse(p.read_text(encoding="utf-8")) if p.exists() else tomlkit.document()
+            )
+            for section, values in self.to_dict().items():
+                if section not in document:
+                    document[section] = tomlkit.table()
+                for key, value in values.items():
+                    document[section][key] = value
+            _atomic_write(p, tomlkit.dumps(document), overwrite=True)
+        except (OSError, ValueError, tomlkit.exceptions.ParseError) as exc:
+            raise ConfigError(f"Cannot save configuration {p}: {exc}") from exc
         return p
 
-    def _to_toml_string(self) -> str:
-        lines: list[str] = []
-        d = self.to_dict()
-        for section, values in d.items():
-            lines.append(f"[{section}]")
-            for k, v in values.items():
-                if isinstance(v, str):
-                    lines.append(f'{k} = "{v}"')
-                elif isinstance(v, bool):
-                    lines.append(f"{k} = {'true' if v else 'false'}")
-                elif isinstance(v, list):
-                    items = ", ".join(f'"{x}"' for x in v)
-                    lines.append(f"{k} = [{items}]")
-                else:
-                    lines.append(f"{k} = {v}")
-            lines.append("")
-        return "\n".join(lines)
+
+def default_config_file() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME")
+    # The XDG specification requires an absolute path; ignore relative values.
+    directory = Path(base) if base and Path(base).is_absolute() else Path.home() / ".config"
+    return directory / "forgekit" / "config.toml"
+
+
+def resolve_config_path(path: Path | str | None = None) -> Path:
+    if path is not None:
+        return Path(path).expanduser()
+    return default_config_file()
+
+
+def _atomic_write(path: Path, content: str, overwrite: bool) -> None:
+    if path.is_symlink():
+        raise ConfigError(f"Refusing symbolic-link configuration file: {path}")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temp = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if overwrite:
+            os.replace(temp, path)
+        else:
+            os.link(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def get_config(path: Path | None = None) -> ForgeConfig:
-    return ForgeConfig.load(path)
+    cfg = ForgeConfig.load(path)
+    errors = cfg.validate()
+    if errors:
+        raise ConfigError("Invalid configuration: " + "; ".join(errors))
+    return cfg
 
 
-def ensure_default_config() -> Path:
-    p = DEFAULT_CONFIG_FILE
-    if p.exists():
-        return p
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(DEFAULT_CONFIG_TOML)
+def ensure_default_config(path: Path | None = None, overwrite: bool = False) -> Path:
+    p = resolve_config_path(path)
+    try:
+        _atomic_write(p, DEFAULT_CONFIG_TOML, overwrite)
+    except OSError as exc:
+        raise ConfigError(f"Cannot create configuration {p}: {exc}") from exc
     return p

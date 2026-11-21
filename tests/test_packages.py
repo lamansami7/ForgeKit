@@ -31,17 +31,24 @@ def test_packages_json():
 
 def test_packages_list_mock():
     with patch(
-        "forgekit.services.package_service.list_installed_packages",
+        "forgekit.commands.packages.list_installed_packages",
         return_value=["pkg1 1.0", "pkg2 2.0"],
     ):
         result = runner.invoke(app, ["packages", "list", "--manager", "apt"])
         assert result.exit_code == 0
+        assert "pkg1" in result.output
 
 
 def test_packages_updates_mock():
     with patch(
-        "forgekit.services.package_service.check_updates_generic",
-        return_value={"manager": "apt", "upgradable_count": 2, "upgradable": ["pkg1"]},
+        "forgekit.commands.packages.check_updates_generic",
+        return_value={
+            "manager": "apt",
+            "available": True,
+            "upgradable_count": 2,
+            "upgradable": ["pkg1"],
+        },
     ):
         result = runner.invoke(app, ["packages", "updates", "--manager", "apt"])
         assert result.exit_code == 0
+        assert "Upgradable: 2" in result.output

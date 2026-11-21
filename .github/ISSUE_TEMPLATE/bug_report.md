@@ -16,7 +16,7 @@ Steps to reproduce:
 **Expected behavior**
 What you expected to happen.
 
-**Environment (paste `forge doctor --verbose` output):**
+**Environment (paste `forge doctor --verbose` output after redacting usernames, paths, hostnames and other sensitive details):**
 ```
 ```
 

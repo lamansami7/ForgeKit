@@ -1,6 +1,7 @@
 """Git services."""
 
 import re
+import shutil
 from pathlib import Path
 
 from forgekit.models.git_info import GitStatus
@@ -37,7 +38,9 @@ def get_git_status(path: Path | str = ".") -> GitStatus:
             staged=[],
             unstaged=[],
             untracked=[],
-            error="Not a git repository",
+            error="Git executable not found in PATH"
+            if not shutil.which("git")
+            else "Not a git repository",
         )
 
     branch: str | None = None
@@ -70,26 +73,24 @@ def get_git_status(path: Path | str = ".") -> GitStatus:
         if r.returncode == 0:
             commit_message = r.stdout.strip()
 
-        # Porcelain status
-        r = run_command(["git", "status", "--porcelain=v1"], cwd=p)
-        if r.returncode == 0:
-            for line in r.stdout.splitlines():
-                if not line:
-                    continue
-                code = line[:2]
-                filepath = line[3:]
-                # Handle renames: "R  old -> new"
-                if " -> " in filepath:
-                    filepath = filepath.split(" -> ")[-1]
-                if code[0] in ("M", "A", "D", "R", "C"):
-                    staged.append(filepath)
-                if code[1] in ("M", "D"):
-                    unstaged.append(filepath)
-                if code == "??":
-                    untracked.append(filepath)
-                    # untracked is not staged/unstaged, remove if added earlier
-                    if filepath in staged:
-                        staged.remove(filepath)
+        # NUL-separated porcelain preserves spaces, quotes and newlines in names.
+        r = run_command(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd=p)
+        if r.returncode != 0:
+            raise RuntimeError(f"git status failed: {r.stderr.strip()}")
+        entries = iter(r.stdout.split("\0"))
+        for entry in entries:
+            if not entry:
+                continue
+            code, filepath = entry[:2], entry[3:]
+            if code == "??":
+                untracked.append(filepath)
+                continue
+            if code[0] not in (" ", "?"):
+                staged.append(filepath)
+            if code[1] not in (" ", "?"):
+                unstaged.append(filepath)
+            if "R" in code or "C" in code:
+                next(entries, None)  # old path follows the destination in -z format
 
         # Ahead/behind
         try:
@@ -116,11 +117,13 @@ def get_git_status(path: Path | str = ".") -> GitStatus:
                         remotes.append({"name": name, "url": redact_url(url)})
 
         # Recent commits: last 5
-        r = run_command(["git", "log", "--oneline", "-5", "--pretty=format:%H|%s|%an|%ar"], cwd=p)
+        r = run_command(
+            ["git", "log", "--oneline", "-5", "--pretty=format:%H%x00%s%x00%an%x00%ar"], cwd=p
+        )
         if r.returncode == 0 and r.stdout.strip():
             recent_commits = []
             for line in r.stdout.splitlines():
-                parts = line.split("|", 3)
+                parts = line.split("\0", 3)
                 if len(parts) == 4:
                     recent_commits.append(
                         {
@@ -134,8 +137,8 @@ def get_git_status(path: Path | str = ".") -> GitStatus:
         # Repo size
         try:
             obj_dir = p / ".git"
-            if not obj_dir.exists():
-                # worktree
+            if not obj_dir.is_dir():
+                # nested directory or worktree
                 r2 = run_command(["git", "rev-parse", "--git-dir"], cwd=p)
                 if r2.returncode == 0:
                     obj_dir = Path(r2.stdout.strip())
@@ -196,33 +199,33 @@ def get_git_status(path: Path | str = ".") -> GitStatus:
     )
 
 
-def get_branches(path: Path | str = ".") -> dict[str, list[str]]:
+def get_branches(path: Path | str = ".") -> dict[str, object]:
     p = Path(path).resolve()
     local: list[str] = []
     remote: list[str] = []
-    current: str | None = None
-    try:
-        r = run_command(["git", "branch", "--format=%(refname:short) %(HEAD)"], cwd=p)
-        if r.returncode == 0:
-            for line in r.stdout.splitlines():
-                parts = line.strip().split()
-                if not parts:
-                    continue
-                name = parts[0]
-                is_current = len(parts) > 1 and parts[1] == "*"
+    current = ""
+    for remote_flag in (False, True):
+        args = (
+            ["git", "branch"]
+            + (["-r"] if remote_flag else [])
+            + ["--format=%(refname:short) %(HEAD)"]
+        )
+        r = run_command(args, cwd=p)
+        if r.returncode:
+            raise RuntimeError(f"Could not list git branches: {r.stderr.strip()}")
+        for line in r.stdout.splitlines():
+            fields = line.split()
+            if not fields:
+                continue
+            name = fields[0]
+            if remote_flag:
+                remote.append(name)
+            else:
+                is_current = len(fields) > 1 and fields[1] == "*"
                 if is_current:
                     current = name
                 local.append(name + (" (current)" if is_current else ""))
-
-        r = run_command(["git", "branch", "-r", "--format=%(refname:short)"], cwd=p)
-        if r.returncode == 0:
-            for line in r.stdout.splitlines():
-                name = line.strip()
-                if name:
-                    remote.append(name)
-    except Exception:
-        pass
-    return {"local": local, "remote": remote, "current": current or ""}
+    return {"local": local, "remote": remote, "current": current}
 
 
 def inspect_path(path: Path | str) -> dict[str, object]:
@@ -242,13 +245,14 @@ def inspect_path(path: Path | str) -> dict[str, object]:
     try:
         parent = p.parent if p.is_file() else p
         if is_git_repo(parent):
-            rel = p.relative_to(find_repo_root(parent) or parent)
-            r = run_command(["git", "log", "--oneline", "-5", "--", str(rel)], cwd=parent)
+            root = find_repo_root(parent) or parent
+            rel = p.relative_to(root)
+            r = run_command(["git", "log", "--oneline", "-5", "--", str(rel)], cwd=root)
             if r.returncode == 0 and r.stdout.strip():
                 info["git_history"] = r.stdout.strip().splitlines()
             r = run_command(
                 ["git", "log", "--diff-filter=A", "--follow", "--format=%aI", "--", str(rel)],
-                cwd=parent,
+                cwd=root,
             )
             if r.returncode == 0 and r.stdout.strip():
                 info["first_seen"] = r.stdout.strip().splitlines()[-1]

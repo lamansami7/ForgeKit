@@ -72,11 +72,11 @@ forge security scan ./nginx.conf
 ```bash
 mkdir -p ~/backups
 forge backup create ./src ~/backups --dry-run
-forge backup create ./src ~/backups
-forge backup list ~/backups/src-*.tar.gz
-forge backup verify ~/backups/src-*.tar.gz
-mkdir /tmp/restore && forge backup restore ~/backups/src-*.tar.gz /tmp/restore --dry-run
-forge backup restore ~/backups/src-*.tar.gz /tmp/restore --force
+forge backup create ./src ~/backups/src.tar.gz
+forge backup list ~/backups/src.tar.gz
+forge backup verify ~/backups/src.tar.gz
+forge backup restore ~/backups/src.tar.gz /tmp/restore --dry-run
+forge backup restore ~/backups/src.tar.gz /tmp/restore
 ```
 
 ## Workspace

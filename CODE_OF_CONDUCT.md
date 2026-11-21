@@ -22,7 +22,7 @@ Examples of unacceptable behavior:
 
 ## Enforcement
 
-Report behavior to the maintainers via GitHub Issues or security contact in `SECURITY.md`. All complaints will be reviewed and investigated.
+Report sensitive conduct concerns privately to the maintainer at `lamansami7@gmail.com`. Please do not publish private information in an issue. Maintainers will review reports as capacity permits.
 
 Violations may result in warning, temporary ban, or permanent ban at the maintainers' discretion.
 

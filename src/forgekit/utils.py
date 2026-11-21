@@ -4,6 +4,7 @@ import re
 import socket
 import subprocess
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 
 def format_bytes(num_bytes: int | float) -> str:
@@ -43,8 +44,13 @@ def run_command(
     cwd: Path | str | None = None,
     timeout: int = 15,
     check: bool = False,
+    env: dict[str, str] | None = None,
+    pass_fds: tuple[int, ...] = (),
 ) -> subprocess.CompletedProcess:
     """Run a subprocess command safely."""
+    if cmd and Path(cmd[0]).name in ("git", "git.exe"):
+        # Git status can otherwise run a repository-configured fsmonitor hook.
+        cmd = [cmd[0], "--no-optional-locks", "-c", "core.fsmonitor=false", *cmd[1:]]
     return subprocess.run(
         cmd,
         cwd=str(cwd) if cwd else None,
@@ -52,6 +58,8 @@ def run_command(
         text=True,
         timeout=timeout,
         check=check,
+        env=env,
+        pass_fds=pass_fds,
     )
 
 
@@ -84,9 +92,25 @@ def is_valid_hostname(hostname: str) -> bool:
 
 
 def redact_url(url: str) -> str:
-    """Redact credentials from URL."""
-    # e.g. https://user:pass@host -> https://***@host
-    return re.sub(r"://[^@/\s]+@", "://***@", url)
+    """Hide URL userinfo, query values and fragments in displayed output."""
+    try:
+        parsed = urlsplit(url)
+        if parsed.netloc:
+            netloc = parsed.netloc.rsplit("@", 1)[-1]
+            if "@" in parsed.netloc:
+                netloc = "***@" + netloc
+            return urlunsplit(
+                (parsed.scheme, netloc, parsed.path, "***" if parsed.query else "", "")
+            )
+        if parsed.query or parsed.fragment:
+            path = re.sub(r"^[^/@\s]+@(?=[^/\s]+:)", "***@", parsed.path)
+            return urlunsplit(
+                (parsed.scheme, parsed.netloc, path, "***" if parsed.query else "", "")
+            )
+    except ValueError:
+        return "[invalid URL]"
+    # Git also accepts scp-like remotes: user@host:path.
+    return re.sub(r"^[^/@\s]+@(?=[^/\s]+:)", "***@", url)
 
 
 def safe_read_text(path: Path, max_bytes: int = 1024 * 1024) -> str | None:

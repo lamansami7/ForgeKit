@@ -3,12 +3,10 @@
 import typer
 
 from forgekit.constants import (
-    CPU_WARNING_THRESHOLD,
     DISK_CRITICAL_THRESHOLD,
     DISK_WARNING_THRESHOLD,
-    MEMORY_WARNING_THRESHOLD,
 )
-from forgekit.output import create_panel, create_table, get_console, print_json
+from forgekit.output import cli_error, create_panel, create_table, get_console, print_json
 from forgekit.services.system_service import (
     get_cpu_info,
     get_disk_info,
@@ -33,10 +31,10 @@ def system_main(
         if json:
             print_json(summary.to_dict())
             return
-        _show_summary(summary)
+        _show_summary(summary, ctx.find_root().obj["config"].thresholds.disk_warning)
 
 
-def _show_summary(summary) -> None:
+def _show_summary(summary, disk_warning: float = DISK_WARNING_THRESHOLD) -> None:
 
     console.print(
         create_panel(
@@ -46,7 +44,7 @@ def _show_summary(summary) -> None:
         )
     )
     console.print(
-        f"[bold]User:[/bold] {summary.user}  [dim]•[/dim]  [bold]Python:[/bold] {summary.python_version}  [dim]•[/dim]  [bold]Uptime:[/bold] {format_duration(summary.uptime_seconds)}"
+        f"[bold]User:[/bold] {summary.user}  [dim]•[/dim]  [bold]Python:[/bold] {summary.python_version}  [dim]•[/dim]  [bold]Uptime:[/bold] {(format_duration(summary.uptime_seconds) if summary.uptime_seconds is not None else 'unavailable')}"
     )
     if summary.load_avg:
         console.print(
@@ -58,7 +56,7 @@ def _show_summary(summary) -> None:
 
     if summary.cpu:
         console.print(
-            f"\n[bold cyan]CPU:[/bold cyan] {summary.cpu.model} ({summary.cpu.physical_cores} cores, {summary.cpu.logical_cores} threads) — {summary.cpu.usage_percent:.1f}%"
+            f"\n[bold cyan]CPU:[/bold cyan] {summary.cpu.model} ({summary.cpu.physical_cores or 'unavailable'} cores, {summary.cpu.logical_cores or 'unavailable'} threads) — {summary.cpu.usage_percent:.1f}%"
         )
         if summary.cpu.frequency_current_mhz:
             console.print(f"  Frequency: {summary.cpu.frequency_current_mhz:.0f} MHz")
@@ -73,7 +71,7 @@ def _show_summary(summary) -> None:
                 "red"
                 if p.percent >= DISK_CRITICAL_THRESHOLD
                 else "yellow"
-                if p.percent >= DISK_WARNING_THRESHOLD
+                if p.percent >= disk_warning
                 else "green"
             )
             console.print(
@@ -83,11 +81,13 @@ def _show_summary(summary) -> None:
 
 @app.command("cpu")
 def cpu_cmd(
+    ctx: typer.Context,
     json: bool = typer.Option(False, "--json", help="Output as JSON"),
     per_core: bool = typer.Option(False, "--per-core", help="Show per-core usage"),
 ) -> None:
     """Show CPU information."""
-    info = get_cpu_info()
+    info = get_cpu_info(per_core=per_core)
+    warning = ctx.find_root().obj["config"].thresholds.cpu_warning
     if json:
         print_json(info.to_dict())
         return
@@ -97,14 +97,16 @@ def cpu_cmd(
     table.add_column("Value", style="white")
     table.add_row("Model", info.model)
     table.add_row("Architecture", info.architecture)
-    table.add_row("Physical cores", str(info.physical_cores))
-    table.add_row("Logical processors", str(info.logical_cores))
+    table.add_row(
+        "Physical cores",
+        str(info.physical_cores) if info.physical_cores is not None else "unavailable",
+    )
+    table.add_row(
+        "Logical processors",
+        str(info.logical_cores) if info.logical_cores is not None else "unavailable",
+    )
     usage_color = (
-        "red"
-        if info.usage_percent >= CPU_WARNING_THRESHOLD
-        else "green"
-        if info.usage_percent < 50
-        else "yellow"
+        "red" if info.usage_percent >= warning else "green" if info.usage_percent < 50 else "yellow"
     )
     table.add_row("Usage", f"[{usage_color}]{info.usage_percent:.1f}%[/{usage_color}]")
     if info.frequency_current_mhz:
@@ -116,7 +118,7 @@ def cpu_cmd(
             )
     console.print(table)
 
-    if per_core or info.per_core_percent:
+    if per_core:
         ctable = create_table(title="Per-core Usage")
         ctable.add_column("Core", style="cyan")
         ctable.add_column("Usage", style="white")
@@ -125,16 +127,18 @@ def cpu_cmd(
             ctable.add_row(f"Core {i}", f"[{color}]{v:.1f}%[/{color}]")
         console.print(ctable)
 
-    if info.usage_percent >= CPU_WARNING_THRESHOLD:
+    if info.usage_percent >= warning:
         console.print(f"[yellow]⚠ High CPU usage: {info.usage_percent:.1f}%[/yellow]")
 
 
 @app.command("memory")
 def memory_cmd(
+    ctx: typer.Context,
     json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ) -> None:
     """Show memory information."""
     info = get_memory_info()
+    warning = ctx.find_root().obj["config"].thresholds.memory_warning
     if json:
         print_json(info.to_dict())
         return
@@ -146,13 +150,7 @@ def memory_cmd(
     table.add_column("Available/Free", style="white")
     table.add_column("Usage", style="white")
 
-    color = (
-        "red"
-        if info.percent >= MEMORY_WARNING_THRESHOLD
-        else "green"
-        if info.percent < 60
-        else "yellow"
-    )
+    color = "red" if info.percent >= warning else "green" if info.percent < 60 else "yellow"
     table.add_row(
         "RAM",
         format_bytes(info.total),
@@ -170,7 +168,7 @@ def memory_cmd(
     )
     console.print(table)
 
-    if info.percent >= MEMORY_WARNING_THRESHOLD:
+    if info.percent >= warning:
         console.print(f"[yellow]⚠ High memory usage: {info.percent:.1f}%[/yellow]")
     if info.swap_percent > 80:
         console.print(f"[yellow]⚠ High swap usage: {info.swap_percent:.1f}%[/yellow]")
@@ -178,10 +176,12 @@ def memory_cmd(
 
 @app.command("disk")
 def disk_cmd(
+    ctx: typer.Context,
     json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ) -> None:
     """Show disk usage."""
     info = get_disk_info()
+    warning = ctx.find_root().obj["config"].thresholds.disk_warning
     if json:
         print_json(info.to_dict())
         return
@@ -204,7 +204,7 @@ def disk_cmd(
             "red"
             if p.percent >= DISK_CRITICAL_THRESHOLD
             else "yellow"
-            if p.percent >= DISK_WARNING_THRESHOLD
+            if p.percent >= warning
             else "green"
         )
         table.add_row(
@@ -221,7 +221,7 @@ def disk_cmd(
     for p in info.partitions:
         if p.percent >= DISK_CRITICAL_THRESHOLD:
             console.print(f"[red]⛔ Critical: {p.mountpoint} at {p.percent:.0f}%[/red]")
-        elif p.percent >= DISK_WARNING_THRESHOLD:
+        elif p.percent >= warning:
             console.print(f"[yellow]⚠ Warning: {p.mountpoint} at {p.percent:.0f}%[/yellow]")
 
 
@@ -235,8 +235,7 @@ def processes_cmd(
 ) -> None:
     """Show top processes."""
     if sort not in ("cpu", "memory"):
-        console.print("[red]Error: --sort must be 'cpu' or 'memory'[/red]")
-        raise typer.Exit(1)
+        cli_error("--sort must be cpu or memory", json)
 
     procs = get_processes(limit=limit, sort_by=sort)
     if json:
@@ -257,9 +256,9 @@ def processes_cmd(
             str(p.pid),
             p.name[:30],
             p.username or "-",
-            f"{p.cpu_percent:.1f}",
-            f"{p.memory_percent:.1f}",
-            format_bytes(p.memory_rss),
+            f"{p.cpu_percent:.1f}" if p.cpu_percent is not None else "—",
+            f"{p.memory_percent:.1f}" if p.memory_percent is not None else "—",
+            format_bytes(p.memory_rss) if p.memory_rss is not None else "—",
             p.status,
         )
 

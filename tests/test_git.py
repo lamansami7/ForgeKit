@@ -19,13 +19,13 @@ def test_not_a_repo(tmp_path):
 
 def test_git_status_cli_outside_repo(tmp_path):
     result = runner.invoke(app, ["git", "--path", str(tmp_path)])
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     assert "Not a git repository" in result.output
 
 
 def test_git_json_outside_repo(tmp_path):
     result = runner.invoke(app, ["git", "--path", str(tmp_path), "--json"])
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     import json
 
     data = json.loads(result.output)

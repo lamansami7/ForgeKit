@@ -18,16 +18,16 @@ src/forgekit/
   services/           — business logic (system, network, git, filesystem, package, security, backup, developer)
   models/             — dataclass models with to_dict()
   commands/           — Typer sub-apps (system, net, git, files, packages, dev, security, backup, workspace, doctor, dashboard, info, config)
-  storage/            — optional SQLite history + file cache
+  storage/            — opt-in SQLite history + file cache; not used automatically by the CLI
   resources/          — static assets (empty, extensible)
 ```
 
 ## Design Principles
 
 - **Linux-first, cross-platform aware** — `platform.py` abstracts OS; commands explain when unsupported.
-- **Services vs Commands** — Services are testable, I/O-free logic; Commands handle CLI + rendering.
+- **Services vs Commands** — Services encapsulate testable I/O and business logic; commands handle arguments and rendering.
 - **Safe defaults** — read-only scans, no auto-delete, overwrite protection, credential redaction.
-- **JSON everywhere** — `--json` returns structured data without Rich markup.
+- **Machine output** — supported `--json` commands return JSON without Rich markup; argument-parser errors remain human-readable.
 - **Mocks in tests** — network/hardware/package managers mocked; no internet/root needed.
 
 ## Adding a Command
@@ -42,14 +42,16 @@ src/forgekit/
 
 - Location: `~/.config/forgekit/config.toml`
 - Dataclass `ForgeConfig` with sections: general, dashboard, thresholds, backup, files, network
-- TOML via `tomllib` load + `tomli_w` (or manual fallback) save + `validate()` method.
+- TOML via `tomllib` for reading and `tomlkit` for comment-preserving edits; saves use temporary files and atomic publication.
 
 ## Error Handling
 
 - Exceptions subclass `ForgeKitError` with `exit_code`.
-- CLI catches and prints human-readable errors with exit 1.
+- Expected service failures are reported by command handlers; command-line syntax errors are handled by Typer.
 
 ## Packaging
 
 - `pyproject.toml` with Hatchling, `forge` entry point, `requires-python >=3.11`
-- Optional `dev` dependencies: pytest, ruff
+- Optional `dev` dependencies: pytest, coverage, Ruff and build
+
+The optional history helper stores its supplied command string verbatim. Callers must not supply credentials or sensitive arguments.

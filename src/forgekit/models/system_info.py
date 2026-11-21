@@ -8,8 +8,8 @@ from typing import Any
 class CpuInfo:
     model: str
     architecture: str
-    physical_cores: int
-    logical_cores: int
+    physical_cores: int | None
+    logical_cores: int | None
     usage_percent: float
     per_core_percent: list[float]
     frequency_current_mhz: float | None
@@ -33,6 +33,7 @@ class MemoryInfo:
     swap_percent: float
     swap_sin: int | None = None
     swap_sout: int | None = None
+    raw_used: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -65,9 +66,9 @@ class ProcessInfo:
     pid: int
     name: str
     username: str | None
-    cpu_percent: float
-    memory_percent: float
-    memory_rss: int
+    cpu_percent: float | None
+    memory_percent: float | None
+    memory_rss: int | None
     status: str
     create_time: float | None = None
 
@@ -82,7 +83,7 @@ class SystemSummary:
     os_version: str
     kernel: str
     architecture: str
-    uptime_seconds: float
+    uptime_seconds: float | None
     cpu: CpuInfo | None
     memory: MemoryInfo | None
     disk: DiskInfo | None

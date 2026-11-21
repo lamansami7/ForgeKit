@@ -4,7 +4,7 @@ from pathlib import Path
 
 import typer
 
-from forgekit.output import create_table, get_console, print_json
+from forgekit.output import cli_error, create_table, get_console, print_json
 from forgekit.services.security_service import check_security
 
 app = typer.Typer(help="Security diagnostics (non-invasive).", no_args_is_help=False)
@@ -24,10 +24,16 @@ def security_main(
 def _run_check(target: Path | None, as_json: bool) -> None:
     p = target.resolve() if target else None
     if p and not p.exists():
-        console.print(f"[red]Path not found: {p}[/red]")
-        raise typer.Exit(1)
+        cli_error(f"Path not found: {p}", as_json)
 
-    findings = check_security(p)
+    try:
+        findings = check_security(p)
+    except (OSError, ValueError) as exc:
+        if as_json:
+            print_json({"error": str(exc)})
+        else:
+            console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
 
     if as_json:
         print_json(findings)
@@ -80,12 +86,18 @@ def scan_cmd(
 
     p = Path(target)
     if not p.exists():
-        console.print(f"[red]File not found: {p}[/red]")
-        raise typer.Exit(1)
+        cli_error(f"File not found: {p}", json)
 
-    findings = scan_risky_config(p)
-    # Also include general checks
-    extra = check_security(p)
+    try:
+        findings = scan_risky_config(p)
+        # Also include general checks
+        extra = check_security(p)
+    except (OSError, ValueError) as exc:
+        if json:
+            print_json({"error": str(exc)})
+        else:
+            console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
     # merge
     all_findings = findings + [f for f in extra if f["check"] != "config_pattern"]
 

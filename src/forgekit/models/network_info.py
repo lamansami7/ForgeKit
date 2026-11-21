@@ -17,6 +17,7 @@ class PingResult:
     max_ms: float | None
     success: bool
     error: str | None = None
+    method: str = "icmp"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -66,7 +67,7 @@ class PortInfo:
 @dataclass
 class InterfaceInfo:
     name: str
-    is_up: bool
+    is_up: bool | None
     mtu: int | None
     ipv4: list[str]
     ipv6: list[str]

@@ -19,27 +19,38 @@ app = typer.Typer(help="Filesystem analysis toolkit.", no_args_is_help=True)
 console = get_console()
 
 
-def _exclude_dirs() -> set[str]:
-    cfg = get_config()
+def _exclude_dirs(ctx: typer.Context) -> set[str]:
+    cfg = ctx.find_root().obj.get("config")
+    if cfg is None:
+        cfg = get_config()
     return set(cfg.files.exclude_dirs)
+
+
+def _directory(path: str, as_json: bool) -> Path:
+    root = Path(path).expanduser().resolve()
+    if not root.is_dir():
+        if as_json:
+            print_json({"error": f"Not an accessible directory: {root}"})
+        else:
+            console.print(f"[red]Not an accessible directory: {root}[/red]")
+        raise typer.Exit(1)
+    return root
 
 
 @app.command("large")
 def large_cmd(
+    ctx: typer.Context,
     path: str = typer.Argument(..., help="Directory to scan"),
-    threshold: int = typer.Option(100, "--threshold", "-t", help="Size threshold in MB"),
+    threshold: int = typer.Option(100, "--threshold", "-t", help="Size threshold in MB", min=0),
     limit: int = typer.Option(20, "--limit", "-n", help="Max results", min=1, max=100),
     json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ) -> None:
     """Find large files."""
-    root = Path(path).resolve()
-    if not root.exists():
-        console.print(f"[red]Path not found: {root}[/red]")
-        raise typer.Exit(1)
+    root = _directory(path, json)
 
     threshold_bytes = threshold * 1024 * 1024
     results = find_large_files(
-        root, threshold_bytes=threshold_bytes, exclude_dirs=_exclude_dirs(), limit=limit
+        root, threshold_bytes=threshold_bytes, exclude_dirs=_exclude_dirs(ctx), limit=limit
     )
     if json:
         print_json(results)
@@ -61,19 +72,19 @@ def large_cmd(
 
 @app.command("search")
 def search_cmd(
+    ctx: typer.Context,
     path: str = typer.Argument(..., help="Directory to search"),
     query: str = typer.Argument(..., help="Search query (filename or extension)"),
     ext: bool = typer.Option(False, "--ext", help="Search by extension"),
-    limit: int = typer.Option(50, "--limit", "-n", help="Max results"),
+    limit: int = typer.Option(50, "--limit", "-n", help="Max results", min=1),
     json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ) -> None:
     """Search files by name or extension."""
-    root = Path(path).resolve()
-    if not root.exists():
-        console.print(f"[red]Path not found: {root}[/red]")
-        raise typer.Exit(1)
+    root = _directory(path, json)
 
-    results = search_files(root, query, exclude_dirs=_exclude_dirs(), by_extension=ext, limit=limit)
+    results = search_files(
+        root, query, exclude_dirs=_exclude_dirs(ctx), by_extension=ext, limit=limit
+    )
     if json:
         print_json(results)
         return
@@ -93,16 +104,14 @@ def search_cmd(
 
 @app.command("size")
 def size_cmd(
+    ctx: typer.Context,
     path: str = typer.Argument(..., help="Directory to analyze"),
     json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ) -> None:
     """Show directory size breakdown."""
-    root = Path(path).resolve()
-    if not root.exists():
-        console.print(f"[red]Path not found: {root}[/red]")
-        raise typer.Exit(1)
+    root = _directory(path, json)
 
-    info = directory_size(root, exclude_dirs=_exclude_dirs())
+    info = directory_size(root, exclude_dirs=_exclude_dirs(ctx))
     if json:
         print_json(info)
         return
@@ -136,16 +145,14 @@ def size_cmd(
 
 @app.command("empty")
 def empty_cmd(
+    ctx: typer.Context,
     path: str = typer.Argument(..., help="Directory to scan"),
     json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ) -> None:
     """Find empty directories."""
-    root = Path(path).resolve()
-    if not root.exists():
-        console.print(f"[red]Path not found: {root}[/red]")
-        raise typer.Exit(1)
+    root = _directory(path, json)
 
-    results = find_empty_dirs(root, exclude_dirs=_exclude_dirs())
+    results = find_empty_dirs(root, exclude_dirs=_exclude_dirs(ctx))
     if json:
         print_json(results)
         return
@@ -166,17 +173,15 @@ def empty_cmd(
 
 @app.command("duplicates")
 def duplicates_cmd(
+    ctx: typer.Context,
     path: str = typer.Argument(..., help="Directory to scan"),
     json: bool = typer.Option(False, "--json", help="Output as JSON"),
-    min_size: int = typer.Option(1, "--min-size", help="Minimum file size in bytes"),
+    min_size: int = typer.Option(1, "--min-size", help="Minimum file size in bytes", min=0),
 ) -> None:
     """Find duplicate files by content hash."""
-    root = Path(path).resolve()
-    if not root.exists():
-        console.print(f"[red]Path not found: {root}[/red]")
-        raise typer.Exit(1)
+    root = _directory(path, json)
 
-    results = find_duplicates(root, exclude_dirs=_exclude_dirs(), min_size=min_size)
+    results = find_duplicates(root, exclude_dirs=_exclude_dirs(ctx), min_size=min_size)
     if json:
         print_json(results)
         return

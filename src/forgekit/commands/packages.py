@@ -2,7 +2,7 @@
 
 import typer
 
-from forgekit.output import create_table, get_console, print_json
+from forgekit.output import cli_error, create_table, get_console, print_json
 from forgekit.services.package_service import (
     check_updates_generic,
     detect_managers,
@@ -26,7 +26,7 @@ def packages_main(
 def _show_packages(as_json: bool) -> None:
     managers = detect_managers()
     if as_json:
-        print_json({"managers": managers, "primary": primary_manager()})
+        print_json({"managers": managers, "primary": managers[0] if managers else None})
         return
 
     if not managers:
@@ -50,7 +50,7 @@ def _show_packages(as_json: bool) -> None:
     console.print(table)
 
     # Show update info for primary
-    prim = primary_manager()
+    prim = managers[0] if managers else None
     if prim:
         console.print(f"\n[dim]Primary: {prim['name']} — to update: {prim['update_cmd']}[/dim]")
         console.print(
@@ -68,11 +68,16 @@ def list_cmd(
     prim = primary_manager()
     mgr = manager or (prim["name"] if prim else None)
     if not mgr:
-        console.print("[red]No package manager detected. Use --manager to specify.[/red]")
-        raise typer.Exit(1)
+        cli_error("No package manager detected. Use --manager to specify.", json)
 
-    console.print(f"[dim]Listing packages via {mgr}...[/dim]")
-    pkgs = list_installed_packages(mgr, limit=limit)
+    try:
+        pkgs = list_installed_packages(mgr, limit=limit)
+    except (ValueError, OSError, RuntimeError) as exc:
+        if json:
+            print_json({"error": str(exc)})
+        else:
+            console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
     if json:
         print_json({"manager": mgr, "packages": pkgs})
         return
@@ -98,15 +103,20 @@ def updates_cmd(
     prim = primary_manager()
     mgr = manager or (prim["name"] if prim else None)
     if not mgr:
-        console.print("[red]No package manager detected.[/red]")
-        raise typer.Exit(1)
+        cli_error("No package manager detected.", json)
 
-    console.print(f"[dim]Checking updates via {mgr}...[/dim]")
     info = check_updates_generic(mgr)
     if json:
         print_json(info)
+        if not info.get("available"):
+            raise typer.Exit(1)
         return
 
+    if not info.get("available"):
+        console.print(
+            f"[yellow]{info.get('error') or info.get('note') or 'Update status unavailable'}[/yellow]"
+        )
+        raise typer.Exit(1)
     if info.get("upgradable_count") is not None:
         console.print(f"[bold]Upgradable: {info['upgradable_count']}[/bold]")
         if info.get("upgradable"):

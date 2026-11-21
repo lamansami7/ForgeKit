@@ -1,11 +1,13 @@
 """Security diagnostics — non-invasive checks."""
 
+import os
 import re
+import stat
 from pathlib import Path
 
-from forgekit.core.permissions import check_ssh_permissions, is_world_writable
+from forgekit.core.permissions import check_ssh_permissions
 from forgekit.platform import is_root
-from forgekit.utils import safe_read_text
+from forgekit.services.package_service import check_updates_generic, primary_manager
 
 
 def check_security(path: Path | None = None) -> list[dict[str, str]]:
@@ -41,7 +43,7 @@ def check_security(path: Path | None = None) -> list[dict[str, str]]:
                     "level": iss.get("severity", "warn"),
                     "check": "ssh_permissions",
                     "message": f"{iss['path']}: {iss['issue']}",
-                    "fix": "chmod 700 ~/.ssh; chmod 600 ~/.ssh/id_* ~/.ssh/authorized_keys",
+                    "fix": "Review permissions for this specific path; do not change public keys blindly",
                 }
             )
     else:
@@ -66,59 +68,90 @@ def check_security(path: Path | None = None) -> list[dict[str, str]]:
                 }
             )
 
-    # 3. World-writable files in selected locations
+    # Bounded traversal: actually prune exclusions and depth instead of merely
+    # skipping entries after descending into them.
     scan_root = path or Path.home()
-    # Limit scan to avoid huge traversal: check only top-level dotfiles and selected dir if provided
-    # For home default, scan 2 levels with cap
-    ww_files: list[str] = []
-    try:
-        max_scan = 1000
-        count = 0
-        for p in scan_root.rglob("*"):
-            if count >= max_scan:
-                break
-            # Avoid descending into huge dirs
-            if ".git" in p.parts or "node_modules" in p.parts or ".cache" in p.parts:
-                continue
-            try:
-                if p.is_file() and is_world_writable(p):
-                    ww_files.append(str(p))
-                    if len(ww_files) >= 10:
-                        break
-            except (PermissionError, OSError):
-                continue
-            count += 1
-            # Limit depth: only scan if user provided specific path, else shallow
-            if scan_root == Path.home() and len(p.parts) - len(scan_root.parts) > 3:
-                continue
-    except (PermissionError, OSError):
-        pass
+    world_writable: list[tuple[str, str, bool]] = []
+    count = 0
+    incomplete = False
 
-    if ww_files:
-        for f in ww_files[:5]:
-            findings.append(
-                {
-                    "level": "warn",
-                    "check": "world_writable",
-                    "message": f"World-writable: {f}",
-                    "fix": "chmod o-w <file> or review permissions",
-                }
-            )
-        if len(ww_files) > 5:
-            findings.append(
-                {
-                    "level": "info",
-                    "check": "world_writable",
-                    "message": f"... and {len(ww_files) - 5} more world-writable files",
-                    "fix": "",
-                }
-            )
+    def onerror(_error: OSError) -> None:
+        nonlocal incomplete
+        incomplete = True
+
+    def inspect(item: Path) -> None:
+        nonlocal count, incomplete
+        try:
+            mode = item.lstat().st_mode
+            count += 1
+            if mode & stat.S_IWOTH and (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                kind = "directory" if stat.S_ISDIR(mode) else "regular file"
+                world_writable.append((str(item), kind, bool(mode & stat.S_ISVTX)))
+        except OSError:
+            incomplete = True
+
+    if scan_root.is_file():
+        inspect(scan_root)
     else:
+        for directory, dirs, files in os.walk(
+            scan_root, topdown=True, followlinks=False, onerror=onerror
+        ):
+            if count >= 1000:
+                incomplete = True
+                break
+            inspect(Path(directory))
+            depth = len(Path(directory).relative_to(scan_root).parts)
+            dirs[:] = [
+                d
+                for d in dirs
+                if d not in {".git", "node_modules", ".cache"}
+                and not (Path(directory) / d).is_symlink()
+            ]
+            if path is None and depth >= 3:
+                if dirs:
+                    incomplete = True
+                dirs[:] = []
+            for name in files:
+                if count >= 1000:
+                    incomplete = True
+                    break
+                inspect(Path(directory) / name)
+            if count >= 1000:
+                break
+    for filename, kind, sticky in world_writable[:5]:
         findings.append(
             {
-                "level": "pass",
+                "level": "info" if kind == "directory" and sticky else "warn",
                 "check": "world_writable",
-                "message": "No world-writable files found in scanned scope",
+                "message": f"World-writable {kind}: {filename}"
+                + (" (sticky bit set)" if kind == "directory" and sticky else ""),
+                "fix": "Review permissions; consider removing other-write access",
+            }
+        )
+    if len(world_writable) > 5:
+        findings.append(
+            {
+                "level": "info",
+                "check": "world_writable",
+                "message": f"... and {len(world_writable) - 5} more",
+                "fix": "",
+            }
+        )
+    if not world_writable:
+        findings.append(
+            {
+                "level": "info",
+                "check": "world_writable",
+                "message": "No world-writable files or directories found in inspected scope",
+                "fix": "",
+            }
+        )
+    if incomplete:
+        findings.append(
+            {
+                "level": "warn",
+                "check": "world_writable",
+                "message": "Scan was limited or some paths were inaccessible; results are incomplete",
                 "fix": "",
             }
         )
@@ -140,122 +173,109 @@ def check_security(path: Path | None = None) -> list[dict[str, str]]:
 
 
 def check_firewall() -> list[dict[str, str]]:
+    """Observe available firewall tools without elevating privileges or modifying rules."""
     import shutil
     import subprocess
 
-    results: list[dict[str, str]] = []
-    # Check ufw
+    def finding(level: str, message: str, fix: str = "") -> list[dict[str, str]]:
+        return [{"level": level, "check": "firewall", "message": message, "fix": fix}]
+
     if shutil.which("ufw"):
         try:
-            r = subprocess.run(["ufw", "status"], capture_output=True, text=True, timeout=5)
-            out = (r.stdout + r.stderr).lower()
-            if "inactive" in out:
-                results.append(
-                    {
-                        "level": "warn",
-                        "check": "firewall",
-                        "message": "ufw is installed but inactive",
-                        "fix": "sudo ufw enable (review rules first)",
-                    }
-                )
-            elif "active" in out:
-                results.append(
-                    {"level": "pass", "check": "firewall", "message": "ufw is active", "fix": ""}
-                )
-            else:
-                results.append(
-                    {
-                        "level": "info",
-                        "check": "firewall",
-                        "message": f"ufw status: {out[:100]}",
-                        "fix": "",
-                    }
-                )
-            return results
-        except Exception:
-            pass
+            result = subprocess.run(["ufw", "status"], capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return finding("info", f"ufw status unavailable ({type(exc).__name__})")
+        output = (result.stdout + result.stderr).lower()
+        if result.returncode != 0:
+            return finding("info", "ufw status unavailable (permissions or command error)")
+        if re.search(r"status:\s*inactive\b", output):
+            return finding(
+                "warn", "ufw is installed but inactive", "Review rules before enabling ufw"
+            )
+        if re.search(r"status:\s*active\b", output):
+            return finding("pass", "ufw is active")
+        return finding("info", "ufw status could not be determined")
 
     if shutil.which("firewall-cmd"):
         try:
-            r = subprocess.run(
+            result = subprocess.run(
                 ["firewall-cmd", "--state"], capture_output=True, text=True, timeout=5
             )
-            if "running" in (r.stdout + r.stderr).lower():
-                results.append(
-                    {
-                        "level": "pass",
-                        "check": "firewall",
-                        "message": "firewalld is running",
-                        "fix": "",
-                    }
-                )
-                return results
-        except Exception:
-            pass
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return finding("info", f"firewalld status unavailable ({type(exc).__name__})")
+        state = (result.stdout or result.stderr).strip().lower()
+        if result.returncode == 0 and state == "running":
+            return finding("pass", "firewalld is running")
+        if state == "not running":
+            return finding("warn", "firewalld is not running", "Review firewall configuration")
+        return finding("info", "firewalld status unavailable (permissions or command error)")
 
     if shutil.which("iptables"):
-        results.append(
-            {
-                "level": "info",
-                "check": "firewall",
-                "message": "iptables found but status unknown (requires root to inspect)",
-                "fix": "sudo iptables -L to review rules",
-            }
+        return finding(
+            "info",
+            "iptables found but status unknown (requires permission to inspect)",
+            "Review firewall rules manually",
         )
-        return results
-
-    results.append(
-        {
-            "level": "info",
-            "check": "firewall",
-            "message": "No common firewall tool detected (ufw/firewalld/iptables)",
-            "fix": "Consider enabling ufw or firewalld",
-        }
+    return finding(
+        "info",
+        "No common firewall tool detected (ufw/firewalld/iptables)",
+        "Review firewall configuration manually",
     )
-    return results
 
 
 def check_updates_available() -> dict[str, str]:
-    # Use package manager detection
-    from forgekit.services.package_service import check_updates_generic, detect_managers
-
-    managers = detect_managers()
-    if not managers:
+    """Use cached package metadata only, and distinguish unavailable from zero updates."""
+    manager = primary_manager()
+    if not manager or not isinstance(manager.get("name"), str):
         return {
             "level": "info",
             "check": "updates",
             "message": "No supported package manager found for update check",
             "fix": "",
         }
-    primary = managers[0]
-    info = check_updates_generic(primary["name"])  # type: ignore
-    count = info.get("upgradable_count")
-    if count is not None and isinstance(count, int) and count > 0:
+    name = manager["name"]
+    result = check_updates_generic(name)
+    count = result.get("upgradable_count")
+    if result.get("available") and isinstance(count, int):
         return {
-            "level": "warn",
+            "level": "warn" if count else "info",
             "check": "updates",
-            "message": f"{count} updates available via {primary['name']}",
-            "fix": f"Run: {primary['update_cmd']}",
+            "message": f"{count} updates available via {name} (cached metadata may be stale)",
+            "fix": f"Review and run: {manager['update_cmd']}" if count else "",
         }
-    if count == 0:
-        return {
-            "level": "pass",
-            "check": "updates",
-            "message": "System appears up to date (no pending updates detected)",
-            "fix": "",
-        }
+    reason = result.get("error") or result.get("note") or "check manually"
     return {
         "level": "info",
         "check": "updates",
-        "message": f"Update status for {primary['name']}: {info.get('note', 'check manually')}",
-        "fix": f"Run: {primary['update_cmd']}",
+        "message": f"Update check unavailable for {name}: {reason}",
+        "fix": "Check your package manager manually",
     }
 
 
 def scan_risky_config(path: Path) -> list[dict[str, str]]:
-    content = safe_read_text(path)
-    if not content:
-        return []
+    """Check at most one MiB of an explicitly selected file without displaying values."""
+    max_bytes = 1024 * 1024
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode):
+        raise ValueError(f"Not a regular file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    try:
+        actual = os.fstat(fd)
+        if not stat.S_ISREG(actual.st_mode) or (actual.st_dev, actual.st_ino) != (
+            before.st_dev,
+            before.st_ino,
+        ):
+            raise ValueError(f"File changed before it could be scanned: {path}")
+        with os.fdopen(fd, "rb") as stream:
+            fd = -1
+            content_bytes = stream.read(max_bytes + 1)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if len(content_bytes) > max_bytes:
+        raise ValueError(f"File is too large to scan (limit {max_bytes} bytes): {path}")
+    content = content_bytes.decode("utf-8", errors="replace")
     findings: list[dict[str, str]] = []
     patterns = [
         (r"password\s*=\s*[\"']?.+", "Possible hardcoded password", "warn"),
@@ -269,13 +289,13 @@ def scan_risky_config(path: Path) -> list[dict[str, str]]:
             "info",
         ),
     ]
-    for pat, msg, level in patterns:
-        if re.search(pat, content, re.IGNORECASE):
+    for pattern, message, level in patterns:
+        if re.search(pattern, content, re.IGNORECASE):
             findings.append(
                 {
                     "level": level,
                     "check": "config_pattern",
-                    "message": f"{msg} in {path.name}",
+                    "message": f"{message} in {path.name}",
                     "fix": "Review and remove sensitive values; use environment variables or secret management",
                 }
             )

@@ -1,6 +1,7 @@
-"""Permission helpers."""
+"""Permission helpers for non-invasive diagnostics."""
 
 import os
+import stat
 from pathlib import Path
 
 
@@ -14,40 +15,65 @@ def can_write(path: Path) -> bool:
 
 def is_world_writable(path: Path) -> bool:
     try:
-        st = path.stat()
-        return bool(st.st_mode & 0o002)
-    except Exception:
+        mode = path.lstat().st_mode
+        return not stat.S_ISLNK(mode) and bool(mode & stat.S_IWOTH)
+    except OSError:
         return False
 
 
 def check_ssh_permissions(home: Path | None = None) -> list[dict[str, str]]:
-    """Check SSH directory/file permissions."""
-    h = home or Path.home()
-    ssh_dir = h / ".ssh"
+    """Report permission concerns without reading SSH files or following links."""
+    ssh_dir = (home or Path.home()) / ".ssh"
     issues: list[dict[str, str]] = []
-    if not ssh_dir.exists():
-        return issues
     try:
-        mode = ssh_dir.stat().st_mode & 0o777
-        if mode != 0o700:
+        mode = ssh_dir.lstat().st_mode
+    except FileNotFoundError:
+        return issues
+    except OSError as exc:
+        return [{"path": str(ssh_dir), "issue": f"could not inspect: {exc}", "severity": "warn"}]
+    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        return [
+            {
+                "path": str(ssh_dir),
+                "issue": "not a regular directory; permissions not checked",
+                "severity": "warn",
+            }
+        ]
+    if mode & 0o077:
+        issues.append(
+            {
+                "path": str(ssh_dir),
+                "issue": f"recommended mode 0700; found {oct(stat.S_IMODE(mode))}",
+                "severity": "warn",
+            }
+        )
+    for name in ("id_rsa", "id_ed25519", "id_ecdsa", "authorized_keys", "config"):
+        path = ssh_dir / name
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            issues.append(
+                {"path": str(path), "issue": f"could not inspect: {exc}", "severity": "warn"}
+            )
+            continue
+        if not stat.S_ISREG(mode):
             issues.append(
                 {
-                    "path": str(ssh_dir),
-                    "issue": f"expected 0700, got {oct(mode)}",
+                    "path": str(path),
+                    "issue": "not a regular file; permissions not checked",
                     "severity": "warn",
                 }
             )
-    except Exception:
-        pass
-    for name in ("id_rsa", "id_ed25519", "id_ecdsa", "authorized_keys", "config"):
-        p = ssh_dir / name
-        if p.exists():
-            try:
-                m = p.stat().st_mode & 0o777
-                if m & 0o077:
-                    issues.append(
-                        {"path": str(p), "issue": f"too permissive: {oct(m)}", "severity": "fail"}
-                    )
-            except Exception:
-                pass
+            continue
+        unsafe = mode & (0o077 if name.startswith("id_") else 0o022)
+        if unsafe:
+            issues.append(
+                {
+                    "path": str(path),
+                    "issue": f"permissions may be too open: {oct(stat.S_IMODE(mode))}",
+                    "severity": "warn",
+                }
+            )
     return issues

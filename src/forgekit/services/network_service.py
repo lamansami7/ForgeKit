@@ -1,10 +1,13 @@
 """Network services."""
 
-import contextlib
+import ipaddress
+import platform
 import re
+import shutil
 import socket
 import subprocess
 import time
+from urllib.parse import urljoin, urlsplit
 
 import psutil
 import requests
@@ -17,16 +20,46 @@ from forgekit.models.network_info import (
     PingResult,
     PortInfo,
 )
+from forgekit.utils import is_valid_hostname, redact_url
 
-SENSITIVE_HEADERS = {"authorization", "cookie", "set-cookie", "x-api-key", "proxy-authorization"}
+SENSITIVE_HEADERS = {
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "x-auth-token",
+    "authentication-info",
+    "proxy-authenticate",
+    "www-authenticate",
+}
 
 
 def ping_host(host: str, count: int = 4, timeout: int = 5) -> PingResult:
-    # Resolve first
-    resolved_ip: str | None = None
+    if not is_valid_hostname(host) or count < 1 or timeout < 1:
+        return PingResult(
+            host=host,
+            resolved_ip=None,
+            packets_sent=0,
+            packets_received=0,
+            packet_loss_percent=100.0,
+            rtts=[],
+            avg_ms=None,
+            min_ms=None,
+            max_ms=None,
+            success=False,
+            error="Invalid host, count or timeout",
+        )
     try:
-        resolved_ip = socket.gethostbyname(host)
-    except socket.gaierror as e:
+        # Numeric addresses bypass the system resolver; hostnames may return IPv6.
+        try:
+            resolved = str(ipaddress.ip_address(host))
+        except ValueError:
+            infos = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            if not infos:
+                raise OSError("No addresses returned")
+            resolved = infos[0][4][0]
+    except OSError as exc:
         return PingResult(
             host=host,
             resolved_ip=None,
@@ -38,101 +71,89 @@ def ping_host(host: str, count: int = 4, timeout: int = 5) -> PingResult:
             min_ms=None,
             max_ms=None,
             success=False,
-            error=f"DNS resolution failed: {e}",
+            error=f"DNS resolution failed: {exc}",
         )
-
-    # Use system ping if available, else TCP fallback
-    ping_bin = None
-    import shutil
-
-    ping_bin = shutil.which("ping")
-
-    rtts: list[float] = []
-    packets_received = 0
-
-    if ping_bin:
+    binary = shutil.which("ping")
+    if binary:
+        system = platform.system()
+        if system == "Windows":
+            cmd = [binary, "-n", str(count), "-w", str(timeout * 1000), resolved]
+        else:
+            wait = timeout * 1000 if system == "Darwin" else timeout
+            cmd = [binary, "-c", str(count), "-W", str(wait)]
+            if ":" in resolved:
+                cmd.append("-6")
+            cmd.append(resolved)
         try:
-            cmd = [ping_bin, "-c", str(count), "-W", str(timeout), host]
-            # On macOS ping uses different args but -c works; -W vs -t
-            # Try to handle: if ping fails with unsupported option, fallback
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout + count * 2 + 5
+                cmd, capture_output=True, text=True, timeout=count * (timeout + 1) + 5
             )
             output = result.stdout + result.stderr
-
-            # Parse rtts: look for time=XX ms
-            for m in re.finditer(r"time[=<]\s*([\d.]+)\s*ms", output):
-                with contextlib.suppress(ValueError):
-                    rtts.append(float(m.group(1)))
-
-            # Parse packet stats: e.g. "4 packets transmitted, 4 received" or "4 packets transmitted, 4 packets received"
-            mt = re.search(r"(\d+)\s+packets transmitted.*?(\d+)\s+.*received", output, re.DOTALL)
-            packets_received = int(mt.group(2)) if mt else len(rtts)
-
-            loss = 0.0
-            ml = re.search(r"(\d+(?:\.\d+)?)%\s+packet loss", output)
-            if ml:
-                loss = float(ml.group(1))
+            rtts = [float(m.group(1)) for m in re.finditer(r"time[=<]\s*([\d.]+)\s*ms", output)]
+            stats = re.search(
+                r"(\d+)\s+packets transmitted.*?(\d+)\s+(?:packets\s+)?received",
+                output,
+                re.DOTALL | re.IGNORECASE,
+            )
+            if not stats and system == "Windows":
+                stats_windows = re.search(r"Received\s*=\s*(\d+)", output, re.IGNORECASE)
+                received = int(stats_windows.group(1)) if stats_windows else len(rtts)
             else:
-                loss = (1 - packets_received / count) * 100 if count else 100
-
-            success = packets_received > 0
-            avg = sum(rtts) / len(rtts) if rtts else None
-
+                received = int(stats.group(2)) if stats else len(rtts)
+            received = min(count, received)
             return PingResult(
                 host=host,
-                resolved_ip=resolved_ip,
+                resolved_ip=resolved,
                 packets_sent=count,
-                packets_received=packets_received,
-                packet_loss_percent=round(loss, 1),
+                packets_received=received,
+                packet_loss_percent=round((1 - received / count) * 100, 1),
                 rtts=[round(x, 2) for x in rtts],
-                avg_ms=round(avg, 2) if avg is not None else None,
+                avg_ms=round(sum(rtts) / len(rtts), 2) if rtts else None,
                 min_ms=round(min(rtts), 2) if rtts else None,
                 max_ms=round(max(rtts), 2) if rtts else None,
-                success=success,
-                error=None if success else "No reply received",
+                success=received > 0,
+                error=None if received else "No ICMP reply received",
+                method="icmp",
             )
-        except Exception:
-            # fallback to TCP
-            pass
-
-    # TCP fallback: attempt socket connect to port 80/443 and measure
-    tcp_rtts: list[float] = []
-    tcp_ok = 0
-    for i in range(count):
-        start = time.monotonic()
-        try:
-            with socket.create_connection((host, 80), timeout=timeout):
-                elapsed = (time.monotonic() - start) * 1000
-                tcp_rtts.append(elapsed)
-                tcp_ok += 1
-        except OSError:
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return PingResult(
+                host=host,
+                resolved_ip=resolved,
+                packets_sent=count,
+                packets_received=0,
+                packet_loss_percent=100.0,
+                rtts=[],
+                avg_ms=None,
+                min_ms=None,
+                max_ms=None,
+                success=False,
+                error=f"Ping failed: {exc}",
+                method="icmp",
+            )
+    # Explicitly identify the TCP fallback; it is not an ICMP measurement.
+    rtts = []
+    for _ in range(count):
+        for port in (80, 443):
+            start = time.monotonic()
             try:
-                start2 = time.monotonic()
-                with socket.create_connection((host, 443), timeout=timeout):
-                    elapsed = (time.monotonic() - start2) * 1000
-                    tcp_rtts.append(elapsed)
-                    tcp_ok += 1
+                with socket.create_connection((resolved, port), timeout=timeout):
+                    rtts.append((time.monotonic() - start) * 1000)
+                    break
             except OSError:
-                pass
-        if i < count - 1:
-            time.sleep(0.2)
-
-    avg = sum(tcp_rtts) / len(tcp_rtts) if tcp_rtts else None
+                continue
     return PingResult(
         host=host,
-        resolved_ip=resolved_ip,
+        resolved_ip=resolved,
         packets_sent=count,
-        packets_received=tcp_ok,
-        packet_loss_percent=round((1 - tcp_ok / count) * 100, 1) if count else 100,
-        rtts=[round(x, 2) for x in tcp_rtts],
-        avg_ms=round(avg, 2) if avg else None,
-        min_ms=round(min(tcp_rtts), 2) if tcp_rtts else None,
-        max_ms=round(max(tcp_rtts), 2) if tcp_rtts else None,
-        success=tcp_ok > 0,
-        error=None
-        if tcp_ok > 0
-        else "TCP connect failed (ping binary unavailable and TCP fallback failed)",
+        packets_received=len(rtts),
+        packet_loss_percent=round((1 - len(rtts) / count) * 100, 1),
+        rtts=[round(x, 2) for x in rtts],
+        avg_ms=round(sum(rtts) / len(rtts), 2) if rtts else None,
+        min_ms=round(min(rtts), 2) if rtts else None,
+        max_ms=round(max(rtts), 2) if rtts else None,
+        success=bool(rtts),
+        error=None if rtts else "TCP fallback failed (ports 80 and 443)",
+        method="tcp",
     )
 
 
@@ -163,54 +184,95 @@ def resolve_dns(domain: str) -> DnsResult:
 
 
 def check_http(url: str, timeout: int = 10) -> HttpResult:
-    if not url.startswith(("http://", "https://")):
+    if "://" not in url:
         url = "https://" + url
-
-    headers_sent = {"User-Agent": "ForgeKit/0.1.0"}
+    display_url = redact_url(url)
     start = time.monotonic()
+    redirected = False
+    current = url
     try:
-        resp = requests.get(url, headers=headers_sent, timeout=timeout, allow_redirects=True)
-        elapsed_ms = (time.monotonic() - start) * 1000
-
-        # Redact sensitive headers
-        safe_headers: dict[str, str] = {}
-        for k, v in resp.headers.items():
-            if k.lower() in SENSITIVE_HEADERS:
-                safe_headers[k] = "***redacted***"
-            else:
-                safe_headers[k] = v
-
-        # TLS info — requests doesn't expose easily; try to get from response
-        tls_version = None
-        try:
-            # urllib3 connection info not exposed; leave None
-            pass
-        except Exception:
-            pass
-
-        return HttpResult(
-            url=url,
-            status_code=resp.status_code,
-            reason=resp.reason,
-            elapsed_ms=round(elapsed_ms, 1),
-            final_url=resp.url if resp.url != url else None,
-            redirected=len(resp.history) > 0,
-            tls_version=tls_version,
-            headers=safe_headers,
-            error=None,
+        if timeout < 1:
+            raise ValueError("Timeout must be positive")
+        for attempt in range(6):
+            parsed = urlsplit(current)
+            if (
+                parsed.scheme not in ("http", "https")
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or any(ord(char) < 32 for char in current)
+            ):
+                raise ValueError("Expected an HTTP(S) URL without embedded credentials")
+            try:
+                _ = parsed.port
+            except ValueError as exc:
+                raise ValueError("Invalid URL port") from exc
+            # Manual redirects avoid requests reading unbounded redirect bodies.
+            response = requests.get(
+                current,
+                headers={"User-Agent": "ForgeKit/0.1.0"},
+                timeout=timeout,
+                allow_redirects=False,
+                stream=True,
+            )
+            try:
+                location = response.headers.get("Location")
+                if response.status_code in (301, 302, 303, 307, 308) and location:
+                    if attempt == 5:
+                        raise ValueError("Too many HTTP redirects")
+                    current = urljoin(current, location)
+                    redirected = True
+                    continue
+                safe_headers = {}
+                for key, value in response.headers.items():
+                    lower = key.lower()
+                    if lower in SENSITIVE_HEADERS or any(
+                        term in lower
+                        for term in (
+                            "token",
+                            "secret",
+                            "api-key",
+                            "api_key",
+                            "apikey",
+                            "password",
+                            "cookie",
+                            "authorization",
+                        )
+                    ):
+                        safe_headers[key] = "***redacted***"
+                    elif lower in ("location", "content-location"):
+                        safe_headers[key] = redact_url(value)
+                    else:
+                        safe_headers[key] = value
+                return HttpResult(
+                    url=display_url,
+                    status_code=response.status_code,
+                    reason=response.reason,
+                    elapsed_ms=round((time.monotonic() - start) * 1000, 1),
+                    final_url=redact_url(current) if redirected else None,
+                    redirected=redirected,
+                    tls_version=None,
+                    headers=safe_headers,
+                    error=None,
+                )
+            finally:
+                response.close()
+        raise ValueError("Too many HTTP redirects")
+    except (requests.exceptions.RequestException, ValueError) as exc:
+        # Exception messages from requests can contain credentials and query values.
+        message = (
+            str(exc) if isinstance(exc, ValueError) else f"{type(exc).__name__}: request failed"
         )
-    except requests.exceptions.RequestException as e:
-        elapsed_ms = (time.monotonic() - start) * 1000
         return HttpResult(
-            url=url,
+            url=display_url,
             status_code=None,
             reason=None,
-            elapsed_ms=round(elapsed_ms, 1),
+            elapsed_ms=round((time.monotonic() - start) * 1000, 1),
             final_url=None,
-            redirected=False,
+            redirected=redirected,
             tls_version=None,
             headers=None,
-            error=str(e),
+            error=message,
         )
 
 
@@ -219,7 +281,9 @@ def get_ports() -> list[PortInfo]:
     try:
         conns = psutil.net_connections(kind="inet")
         for c in conns:
-            if c.status != psutil.CONN_LISTEN:
+            if c.type == socket.SOCK_STREAM and c.status != psutil.CONN_LISTEN:
+                continue
+            if c.type not in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
                 continue
             laddr = c.laddr
             if not laddr:
@@ -251,11 +315,8 @@ def get_ports() -> list[PortInfo]:
                     process=proc_name,
                 )
             )
-    except (psutil.AccessDenied, PermissionError):
-        # Fallback: try reading /proc/net/tcp etc? Return empty with note handled by caller
-        pass
-    except Exception:
-        pass
+    except (psutil.AccessDenied, PermissionError, OSError, NotImplementedError) as exc:
+        raise RuntimeError(f"Cannot inspect local ports: {exc}") from exc
     # Sort by port
     results.sort(key=lambda x: x.local_port)
     return results
@@ -267,12 +328,12 @@ def get_interfaces() -> list[InterfaceInfo]:
         addrs = psutil.net_if_addrs()
         stats = psutil.net_if_stats()
         io_counters = psutil.net_io_counters(pernic=True)
-    except Exception:
-        return interfaces
+    except (psutil.Error, OSError, NotImplementedError) as exc:
+        raise RuntimeError(f"Cannot inspect network interfaces: {exc}") from exc
 
     for name, addr_list in addrs.items():
         stat = stats.get(name)
-        is_up = stat.isup if stat else False
+        is_up = stat.isup if stat else None
         mtu = stat.mtu if stat else None
 
         ipv4: list[str] = []
@@ -310,8 +371,7 @@ def get_interfaces() -> list[InterfaceInfo]:
 def check_connectivity(timeout: int = 5) -> list[ConnectivityCheck]:
     checks: list[ConnectivityCheck] = []
 
-    # Local network: gateway-ish check via localhost
-    # 1. DNS resolution
+    # 1. DNS resolution (this does not probe a local gateway)
     start = time.monotonic()
     try:
         socket.gethostbyname("google.com")
@@ -332,7 +392,9 @@ def check_connectivity(timeout: int = 5) -> list[ConnectivityCheck]:
     for url in ["https://1.1.1.1", "https://google.com"]:
         start = time.monotonic()
         try:
-            requests.get(url, timeout=timeout)
+            result = check_http(url, timeout=timeout)
+            if result.error:
+                raise OSError(result.error)
             latency = (time.monotonic() - start) * 1000
             checks.append(
                 ConnectivityCheck(name=f"HTTPS {url}", success=True, latency_ms=round(latency, 1))

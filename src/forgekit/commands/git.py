@@ -4,7 +4,7 @@ from pathlib import Path
 
 import typer
 
-from forgekit.output import create_table, get_console, print_json
+from forgekit.output import cli_error, create_table, get_console, print_json
 from forgekit.services.git_service import get_branches, get_git_status, inspect_path, is_git_repo
 from forgekit.utils import format_bytes
 
@@ -26,12 +26,18 @@ def _show_status(repo_path: Path, as_json: bool) -> None:
     status = get_git_status(repo_path)
     if as_json:
         print_json(status.to_dict())
+        if not status.is_repo or status.error:
+            raise typer.Exit(1)
         return
 
     if not status.is_repo:
-        console.print(f"[yellow]Not a git repository: {repo_path.resolve()}[/yellow]")
+        console.print(f"[yellow]{status.error}: {repo_path.resolve()}[/yellow]")
         console.print("[dim]Run inside a git repository or specify --path[/dim]")
-        return
+        raise typer.Exit(1)
+
+    if status.error:
+        console.print(f"[red]Git error: {status.error}[/red]")
+        raise typer.Exit(1)
 
     console.print(f"[bold cyan]Repository:[/bold cyan] {repo_path.resolve()}")
     console.print(
@@ -118,19 +124,24 @@ def history_cmd(
 
     p = Path(path).resolve()
     if not is_git_repo(p):
-        console.print(f"[red]Not a git repository: {p}[/red]")
-        raise typer.Exit(1)
+        cli_error(f"Not a git repository or git unavailable: {p}", json)
 
     result = run_command(
-        ["git", "log", f"-{limit}", "--pretty=format:%H|%h|%s|%an|%ar|%ad", "--date=short"], cwd=p
+        [
+            "git",
+            "log",
+            f"-{limit}",
+            "--pretty=format:%H%x00%h%x00%s%x00%an%x00%ar%x00%ad",
+            "--date=short",
+        ],
+        cwd=p,
     )
     if result.returncode != 0:
-        console.print(f"[red]Failed to get history: {result.stderr}[/red]")
-        raise typer.Exit(1)
+        cli_error(f"Failed to get history: {result.stderr.strip()}", json)
 
     commits = []
     for line in result.stdout.splitlines():
-        parts = line.split("|", 5)
+        parts = line.split("\0", 5)
         if len(parts) == 6:
             commits.append(
                 {
@@ -165,10 +176,12 @@ def branches_cmd(
     """List branches."""
     p = Path(path).resolve()
     if not is_git_repo(p):
-        console.print(f"[red]Not a git repository: {p}[/red]")
-        raise typer.Exit(1)
+        cli_error(f"Not a git repository or git unavailable: {p}", json)
 
-    data = get_branches(p)
+    try:
+        data = get_branches(p)
+    except (OSError, RuntimeError) as exc:
+        cli_error(str(exc), json)
     if json:
         print_json(data)
         return
@@ -199,6 +212,8 @@ def inspect_cmd(
     p = Path(target)
     repo = Path(path).resolve()
     info = inspect_path(p if p.is_absolute() else repo / p)
+    if not info["exists"]:
+        cli_error(f"Path not found: {target}", json)
     if json:
         print_json(info)
         return

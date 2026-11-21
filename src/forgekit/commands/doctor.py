@@ -8,8 +8,8 @@ from pathlib import Path
 
 import typer
 
-from forgekit.config import get_config
-from forgekit.constants import DEFAULT_CONFIG_FILE
+from forgekit.config import ForgeConfig, resolve_config_path
+from forgekit.exceptions import ConfigError
 from forgekit.output import create_table, get_console, print_json
 from forgekit.platform import get_platform_info, is_root
 
@@ -24,10 +24,11 @@ def doctor_main(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
 ) -> None:
     # Always run checks; callback handles both `forge doctor` and subcommands if any
-    _run_doctor(json, verbose)
+    _run_doctor(json, verbose, ctx.find_root().obj.get("config_path"))
 
 
-def _run_doctor(as_json: bool, verbose: bool) -> None:
+def _run_doctor(as_json: bool, verbose: bool, custom_path: str | None = None) -> None:
+    config_file = resolve_config_path(custom_path)
     checks: list[dict[str, str]] = []
 
     # 1. Python version
@@ -85,7 +86,7 @@ def _run_doctor(as_json: bool, verbose: bool) -> None:
             )
 
     # 3. Dependencies
-    for dep in ("typer", "rich", "psutil", "requests"):
+    for dep in ("typer", "rich", "psutil", "requests", "tomlkit"):
         try:
             import importlib
 
@@ -109,14 +110,16 @@ def _run_doctor(as_json: bool, verbose: bool) -> None:
             )
 
     # 4. Config validity
-    cfg = get_config()
-    errors = cfg.validate()
+    try:
+        errors = ForgeConfig.load(config_file).validate()
+    except ConfigError as exc:
+        errors = [str(exc)]
     if not errors:
         checks.append(
             {
                 "name": "Configuration",
                 "status": "pass",
-                "message": f"Config valid ({DEFAULT_CONFIG_FILE} {'exists' if DEFAULT_CONFIG_FILE.exists() else 'using defaults'})",
+                "message": f"Config valid ({config_file} {'exists' if config_file.exists() else 'using defaults'})",
                 "fix": "",
             }
         )
@@ -126,7 +129,7 @@ def _run_doctor(as_json: bool, verbose: bool) -> None:
                 "name": "Configuration",
                 "status": "fail",
                 "message": f"Config errors: {'; '.join(errors)}",
-                "fix": f"Edit {DEFAULT_CONFIG_FILE} or run: forge config init",
+                "fix": f"Edit {config_file} or run: forge config init",
             }
         )
 
@@ -154,7 +157,7 @@ def _run_doctor(as_json: bool, verbose: bool) -> None:
             {
                 "name": "Platform",
                 "status": "pass",
-                "message": f"Linux {plat.release} {plat.machine} — fully supported",
+                "message": f"Linux {plat.release} {plat.machine} — primary platform",
                 "fix": "",
             }
         )
@@ -163,7 +166,7 @@ def _run_doctor(as_json: bool, verbose: bool) -> None:
             {
                 "name": "Platform",
                 "status": "warn",
-                "message": f"macOS {plat.release} — supported with limitations",
+                "message": f"macOS {plat.release} — experimental and not release-tested",
                 "fix": "",
             }
         )
@@ -228,12 +231,12 @@ def _run_doctor(as_json: bool, verbose: bool) -> None:
             )
 
     # 9. Config file exists
-    if DEFAULT_CONFIG_FILE.exists():
+    if config_file.exists():
         checks.append(
             {
                 "name": "Config file",
                 "status": "pass",
-                "message": f"Found: {DEFAULT_CONFIG_FILE}",
+                "message": f"Found: {config_file}",
                 "fix": "",
             }
         )
@@ -250,6 +253,8 @@ def _run_doctor(as_json: bool, verbose: bool) -> None:
     # Output
     if as_json:
         print_json(checks)
+        if any(c["status"] == "fail" for c in checks):
+            raise typer.Exit(1)
         return
 
     table = create_table(title="ForgeKit Doctor")
@@ -290,5 +295,5 @@ def _run_doctor(as_json: bool, verbose: bool) -> None:
 
     if verbose:
         console.print(
-            f"\n[dim]Verbose: Python {py_ver} | Platform {plat.system} | Config: {DEFAULT_CONFIG_FILE}[/dim]"
+            f"\n[dim]Verbose: Python {py_ver} | Platform {plat.system} | Config: {config_file}[/dim]"
         )

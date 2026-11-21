@@ -1,5 +1,6 @@
 """Package manager detection."""
 
+import os
 import shutil
 import subprocess
 
@@ -68,42 +69,59 @@ def primary_manager() -> dict[str, str | None] | None:
 
 
 def check_updates_apt() -> dict[str, object]:
-    """Check apt updates without modifying system — read apt lists or use apt check."""
-    info: dict[str, object] = {"manager": "apt", "available": False}
+    """Read upgradable packages from locally cached apt metadata; never refresh it."""
     try:
-        # Try apt list --upgradable (read-only)
-        r = run_command(["apt", "list", "--upgradable"], timeout=10)
-        if r.returncode == 0:
-            lines = [l for l in r.stdout.splitlines() if "/" in l and "upgradable" in l.lower()]
-            info["upgradable_count"] = len(lines)
-            info["upgradable"] = lines[:20]
-            info["available"] = True
-            return info
-    except Exception:
-        pass
-    # Fallback: check if /var/lib/apt/lists exists
-    from pathlib import Path
-
-    if Path("/var/lib/apt/lists").exists():
-        info["note"] = "Run 'apt list --upgradable' to see pending updates"
-        info["available"] = True
-    else:
-        info["note"] = "No apt metadata found"
-    return info
+        result = run_command(
+            ["apt", "list", "--upgradable"], timeout=10, env={**os.environ, "LC_ALL": "C"}
+        )
+        if result.returncode:
+            return {
+                "manager": "apt",
+                "available": False,
+                "error": result.stderr.strip() or "apt failed",
+            }
+        lines = [
+            line
+            for line in result.stdout.splitlines()
+            if "/" in line and "upgradable" in line.lower()
+        ]
+        return {
+            "manager": "apt",
+            "available": True,
+            "upgradable_count": len(lines),
+            "upgradable": lines[:20],
+            "note": "Based on locally cached metadata; it may be stale.",
+        }
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"manager": "apt", "available": False, "error": str(exc)}
 
 
 def check_updates_dnf() -> dict[str, object]:
     try:
-        r = run_command(["dnf", "check-update"], timeout=15)
+        r = run_command(
+            ["dnf", "--cacheonly", "-q", "check-update"],
+            timeout=15,
+            env={**os.environ, "LC_ALL": "C"},
+        )
         # dnf check-update returns 100 if updates available, 0 if none
         if r.returncode in (0, 100):
             lines = [l for l in r.stdout.splitlines() if l.strip() and not l.startswith("Last")]
-            count = len([l for l in lines if "." in l])
+            import re
+
+            packages = [line for line in lines if re.match(r"^\S+\.\S+\s+\S+\s+\S+", line)]
+            count = len(packages)
+            if r.returncode == 100 and not packages:
+                return {
+                    "manager": "dnf",
+                    "available": False,
+                    "error": "Updates were reported but package output could not be parsed",
+                }
             return {
                 "manager": "dnf",
                 "available": True,
                 "upgradable_count": count,
-                "details": lines[:20],
+                "details": packages[:20],
+                "note": "Based on locally cached metadata; it may be stale.",
             }
     except Exception as e:
         return {"manager": "dnf", "available": False, "error": str(e)}
@@ -115,6 +133,25 @@ def check_updates_generic(manager: str) -> dict[str, object]:
         return check_updates_apt()
     if manager == "dnf":
         return check_updates_dnf()
+    if manager == "pacman":
+        try:
+            result = run_command(["pacman", "-Qu"], timeout=10, env={**os.environ, "LC_ALL": "C"})
+            if result.returncode == 0 or (result.returncode == 1 and not result.stderr.strip()):
+                lines = [line for line in result.stdout.splitlines() if line.strip()]
+                return {
+                    "manager": "pacman",
+                    "available": True,
+                    "upgradable_count": len(lines),
+                    "upgradable": lines[:20],
+                    "note": "Based on locally cached metadata; it may be stale.",
+                }
+            return {
+                "manager": "pacman",
+                "available": False,
+                "error": result.stderr.strip() or "pacman failed",
+            }
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"manager": "pacman", "available": False, "error": str(exc)}
     return {
         "manager": manager,
         "available": False,
@@ -123,23 +160,23 @@ def check_updates_generic(manager: str) -> dict[str, object]:
 
 
 def list_installed_packages(manager: str, limit: int = 20) -> list[str]:
+    commands = {
+        "apt": ["apt", "list", "--installed"],
+        "dnf": ["dnf", "--cacheonly", "-q", "list", "installed"],
+        "pacman": ["pacman", "-Q"],
+        "brew": ["brew", "list"],
+    }
+    if manager not in commands:
+        raise ValueError(f"Listing packages is not supported for {manager}")
+    if not shutil.which(commands[manager][0]):
+        raise FileNotFoundError(f"Package manager not found: {manager}")
     try:
-        if manager == "apt":
-            r = run_command(["apt", "list", "--installed"], timeout=10)
-            if r.returncode == 0:
-                return [l for l in r.stdout.splitlines() if "/" in l][:limit]
-        elif manager == "dnf":
-            r = run_command(["dnf", "list", "installed"], timeout=10)
-            if r.returncode == 0:
-                return r.stdout.splitlines()[:limit]
-        elif manager == "pacman":
-            r = run_command(["pacman", "-Q"], timeout=10)
-            if r.returncode == 0:
-                return r.stdout.splitlines()[:limit]
-        elif manager == "brew":
-            r = run_command(["brew", "list"], timeout=10)
-            if r.returncode == 0:
-                return r.stdout.splitlines()[:limit]
-    except Exception:
-        pass
-    return []
+        result = run_command(commands[manager], timeout=10)
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(f"Package listing timed out for {manager}") from exc
+    if result.returncode:
+        raise RuntimeError(f"Package listing failed: {result.stderr.strip() or manager}")
+    lines = result.stdout.splitlines()
+    if manager == "apt":
+        lines = [line for line in lines if "/" in line]
+    return lines[:limit]

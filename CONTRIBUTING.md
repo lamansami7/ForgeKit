@@ -22,17 +22,18 @@ forge doctor
 
 ```bash
 ruff check src/ tests/
-ruff format src/ tests/
-pytest -v
+ruff format --check src/ tests/
+pytest --cov=forgekit --cov-report=term-missing
+python -m build
 ```
 
 5. Push and open a Pull Request against `main`.
 
 ## Guidelines
 
-- No destructive defaults — confirm before delete/overwrite.
+- No destructive defaults — explicitly authorize overwrite; test malicious archives, symlinks and existing files with temporary directories.
 - Never silently transmit or delete user data.
-- All commands must work or explain why they are unsupported (platform-aware).
+- All commands must work or explain why they are unsupported (platform-aware). Linux is the primary target; do not claim untested macOS or Windows support.
 - Use Rich tables/panels for terminal output and provide `--json` where useful.
 - Keep commands consistent: `--help`, `--json`, proper exit codes.
 - Add docs to `docs/` if you change behavior.
@@ -47,4 +48,4 @@ See `CODE_OF_CONDUCT.md`. Be respectful and inclusive.
 
 ## Reporting Issues
 
-Use GitHub Issues with steps to reproduce, expected vs actual, and environment info (`forge doctor --verbose`).
+Use GitHub Issues with steps to reproduce, expected vs actual, and environment info (`forge doctor --verbose`); redact usernames, paths, hostnames and other sensitive details before posting.

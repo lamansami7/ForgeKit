@@ -17,14 +17,17 @@
 If you discover a security vulnerability in ForgeKit:
 
 1. **Do not open a public issue.**
-2. Email the maintainer or use GitHub's private vulnerability reporting.
+2. Use [GitHub private vulnerability reporting](https://github.com/lamansami7/ForgeKit/security/advisories/new) or email the maintainer at `lamansami7@gmail.com`.
 3. Include steps to reproduce, impact, and suggested fix if available.
 
-We aim to respond within 72 hours and will coordinate disclosure.
+The maintainers will review reports and coordinate disclosure as capacity permits.
 
 ## Best Practices for Users
 
 - Run `forge security` and `forge doctor` regularly.
 - Keep your package manager updates current (`forge packages updates`).
 - Never run ForgeKit (or any tool) as root unless specifically required.
-- Review backup archives before restoring with `--force`.
+- Review backup archives and use `--dry-run` before restoring. `--force` explicitly replaces existing regular files.
+- Restore rejects links and special files and is not transactional. Test backups separately, keep a trusted SHA-256 digest, and read [backup safety](docs/commands.md#backup-safety-and-integrity).
+- Network timeouts do not impose a strict total deadline on DNS or slow headers. Redaction is best-effort; review output before sharing.
+- These diagnostics cannot establish that a system or archive is secure.

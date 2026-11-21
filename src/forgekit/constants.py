@@ -1,15 +1,24 @@
 """Constants for ForgeKit."""
 
+import os
 from pathlib import Path
+
+from forgekit import __version__
 
 APP_NAME = "forgekit"
 APP_DISPLAY_NAME = "ForgeKit"
-APP_VERSION = "0.1.0"
+APP_VERSION = __version__
 
-# Config paths
-DEFAULT_CONFIG_DIR = Path.home() / ".config" / "forgekit"
+
+# Config and cache paths. XDG environment values must be absolute.
+def _xdg_base(variable: str, fallback: str) -> Path:
+    value = os.environ.get(variable)
+    return Path(value) if value and Path(value).is_absolute() else Path.home() / fallback
+
+
+DEFAULT_CONFIG_DIR = _xdg_base("XDG_CONFIG_HOME", ".config") / "forgekit"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.toml"
-DEFAULT_CACHE_DIR = Path.home() / ".cache" / "forgekit"
+DEFAULT_CACHE_DIR = _xdg_base("XDG_CACHE_HOME", ".cache") / "forgekit"
 DEFAULT_HISTORY_FILE = DEFAULT_CACHE_DIR / "history.db"
 
 # Thresholds

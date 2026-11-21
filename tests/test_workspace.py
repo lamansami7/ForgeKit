@@ -62,8 +62,7 @@ def test_create_with_git(tmp_path):
         ],
     )
     assert result.exit_code == 0
-    # Check if git init succeeded or gracefully handled
-    assert (tmp_path / "gitproj").exists()
+    assert (tmp_path / "gitproj" / ".git").is_dir()
 
 
 def test_create_invalid_name(tmp_path):

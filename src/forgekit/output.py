@@ -73,3 +73,14 @@ def status_label(passed: bool, warning: bool = False) -> Text:
     if warning:
         return Text("WARN", style="bold yellow")
     return Text("FAIL", style="bold red")
+
+
+def cli_error(message: str, as_json: bool = False, exit_code: int = 1) -> None:
+    """Emit a command failure in the selected format and stop execution."""
+    import typer
+
+    if as_json:
+        print_json({"error": message})
+    else:
+        print_error(message)
+    raise typer.Exit(exit_code)

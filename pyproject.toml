@@ -7,7 +7,8 @@ name = "forgekit"
 dynamic = ["version"]
 description = "ForgeKit — A powerful modular command-line toolkit for Linux, developers, and system diagnostics."
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Sami Laman", email = "lamansami7@gmail.com" }]
 maintainers = [{ name = "Sami Laman", email = "lamansami7@gmail.com" }]
 keywords = ["cli", "system", "diagnostics", "devops", "toolkit"]
@@ -79,3 +80,8 @@ quote-style = "double"
 [tool.coverage.run]
 source = ["src/forgekit"]
 omit = ["tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+# Guard against regressions; the suite covers ~90% of statements.
+fail_under = 90

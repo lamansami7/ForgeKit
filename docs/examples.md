@@ -16,10 +16,12 @@ forge system processes --sort memory --limit 10
 forge net ping 1.1.1.1 -c 3
 forge net ping google.com --json | jq .avg_ms
 forge net dns example.com
+forge net dns slow-resolver.example --timeout 2   # bounded resolution, JSON error on timeout
 forge net check
 forge net ports
 forge net interfaces --json | jq '.[].name'
 forge net http https://httpbin.org/status/200 --headers
+forge net http https://example.com --json | jq '.status_code, .redirected' 
 ```
 
 ## Git

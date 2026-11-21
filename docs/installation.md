@@ -15,6 +15,19 @@ pip install .
 forge --version
 ```
 
+## Install from a built artifact
+
+```bash
+python -m build                                  # creates dist/forgekit-<version>-py3-none-any.whl and .tar.gz
+python -m venv /tmp/forge-verify
+/tmp/forge-verify/bin/pip install dist/forgekit-<version>-py3-none-any.whl
+/tmp/forge-verify/bin/pip check
+/tmp/forge-verify/bin/forge doctor
+```
+
+Installing the sdist (`dist/forgekit-<version>.tar.gz`) exercises the build
+backend and is checked in CI as well.
+
 ## Development install
 
 ```bash
@@ -27,8 +40,10 @@ This installs pytest, coverage, Ruff and the build frontend in editable mode. Fo
 
 ```bash
 forge --help
+forge --version
 forge doctor
 forge system
+forge system memory --json | python -m json.tool
 ```
 
 ## Uninstall

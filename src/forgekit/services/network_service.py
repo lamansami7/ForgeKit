@@ -6,12 +6,14 @@ import re
 import shutil
 import socket
 import subprocess
+import threading
 import time
 from urllib.parse import urljoin, urlsplit
 
 import psutil
 import requests
 
+from forgekit.constants import APP_VERSION
 from forgekit.models.network_info import (
     ConnectivityCheck,
     DnsResult,
@@ -21,6 +23,9 @@ from forgekit.models.network_info import (
     PortInfo,
 )
 from forgekit.utils import is_valid_hostname, redact_url
+
+_MAX_DISPLAYED_HEADERS = 100
+_MAX_HEADER_VALUE = 1024
 
 SENSITIVE_HEADERS = {
     "authorization",
@@ -33,6 +38,31 @@ SENSITIVE_HEADERS = {
     "proxy-authenticate",
     "www-authenticate",
 }
+
+
+def resolve_addresses(host: str, timeout: float = 5.0) -> list[tuple]:
+    """Resolve a hostname with a wall-clock bound.
+
+    The system resolver has no portable timeout; a worker thread lets the CLI
+    report a slow or unresponsive resolver instead of hanging indefinitely.
+    A thread that overruns is left to finish in the background (daemon).
+    """
+    box: dict[str, object] = {}
+
+    def worker() -> None:
+        try:
+            box["infos"] = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        except BaseException as exc:  # re-raised in the caller's thread
+            box["error"] = exc
+
+    thread = threading.Thread(target=worker, name="forgekit-dns", daemon=True)
+    thread.start()
+    thread.join(max(0.1, float(timeout)))
+    if thread.is_alive():
+        raise TimeoutError(f"DNS resolution timed out after {timeout:g}s")
+    if "error" in box:
+        raise box["error"]  # type: ignore[misc]
+    return box.get("infos") or []  # type: ignore[return-value]
 
 
 def ping_host(host: str, count: int = 4, timeout: int = 5) -> PingResult:
@@ -55,10 +85,24 @@ def ping_host(host: str, count: int = 4, timeout: int = 5) -> PingResult:
         try:
             resolved = str(ipaddress.ip_address(host))
         except ValueError:
-            infos = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            infos = resolve_addresses(host, timeout=timeout)
             if not infos:
                 raise OSError("No addresses returned")
             resolved = infos[0][4][0]
+    except TimeoutError as exc:
+        return PingResult(
+            host=host,
+            resolved_ip=None,
+            packets_sent=count,
+            packets_received=0,
+            packet_loss_percent=100.0,
+            rtts=[],
+            avg_ms=None,
+            min_ms=None,
+            max_ms=None,
+            success=False,
+            error=str(exc),
+        )
     except OSError as exc:
         return PingResult(
             host=host,
@@ -157,15 +201,15 @@ def ping_host(host: str, count: int = 4, timeout: int = 5) -> PingResult:
     )
 
 
-def resolve_dns(domain: str) -> DnsResult:
+def resolve_dns(domain: str, timeout: float = 5.0) -> DnsResult:
     ipv4: list[str] = []
     ipv6: list[str] = []
     error: str | None = None
     cname: str | None = None
 
-    # Use socket.getaddrinfo
+    # Bounded getaddrinfo so an unresponsive resolver cannot hang the CLI.
     try:
-        infos = socket.getaddrinfo(domain, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        infos = resolve_addresses(domain, timeout=timeout)
         for family, _, _, canon, sockaddr in infos:
             ip = sockaddr[0]
             if family == socket.AF_INET:
@@ -210,7 +254,7 @@ def check_http(url: str, timeout: int = 10) -> HttpResult:
             # Manual redirects avoid requests reading unbounded redirect bodies.
             response = requests.get(
                 current,
-                headers={"User-Agent": "ForgeKit/0.1.0"},
+                headers={"User-Agent": f"ForgeKit/{APP_VERSION}"},
                 timeout=timeout,
                 allow_redirects=False,
                 stream=True,
@@ -224,7 +268,7 @@ def check_http(url: str, timeout: int = 10) -> HttpResult:
                     redirected = True
                     continue
                 safe_headers = {}
-                for key, value in response.headers.items():
+                for key, value in list(response.headers.items())[:_MAX_DISPLAYED_HEADERS]:
                     lower = key.lower()
                     if lower in SENSITIVE_HEADERS or any(
                         term in lower
@@ -243,7 +287,7 @@ def check_http(url: str, timeout: int = 10) -> HttpResult:
                     elif lower in ("location", "content-location"):
                         safe_headers[key] = redact_url(value)
                     else:
-                        safe_headers[key] = value
+                        safe_headers[key] = value[:_MAX_HEADER_VALUE]
                 return HttpResult(
                     url=display_url,
                     status_code=response.status_code,
@@ -374,7 +418,7 @@ def check_connectivity(timeout: int = 5) -> list[ConnectivityCheck]:
     # 1. DNS resolution (this does not probe a local gateway)
     start = time.monotonic()
     try:
-        socket.gethostbyname("google.com")
+        resolve_addresses("google.com", timeout=timeout)
         latency = (time.monotonic() - start) * 1000
         checks.append(
             ConnectivityCheck(

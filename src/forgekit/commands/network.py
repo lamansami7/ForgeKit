@@ -94,9 +94,10 @@ def ping_cmd(
 def dns_cmd(
     domain: str = typer.Argument(..., help="Domain to resolve"),
     json: bool = typer.Option(False, "--json", help="Output as JSON"),
+    timeout: int = typer.Option(5, "--timeout", help="Resolution timeout seconds", min=1, max=60),
 ) -> None:
     """Resolve DNS for a domain."""
-    result = resolve_dns(domain)
+    result = resolve_dns(domain, timeout=timeout)
     if json:
         print_json(result.to_dict())
         if result.error:

@@ -249,8 +249,14 @@ def get_config(path: Path | None = None) -> ForgeConfig:
 
 def ensure_default_config(path: Path | None = None, overwrite: bool = False) -> Path:
     p = resolve_config_path(path)
+    exists = f"Configuration already exists: {p}; pass --force to replace it"
+    if not overwrite and p.exists() and not p.is_symlink():
+        raise ConfigError(exists)
     try:
         _atomic_write(p, DEFAULT_CONFIG_TOML, overwrite)
+    except FileExistsError as exc:
+        # Another process created the file between the check and publication.
+        raise ConfigError(exists) from exc
     except OSError as exc:
         raise ConfigError(f"Cannot create configuration {p}: {exc}") from exc
     return p

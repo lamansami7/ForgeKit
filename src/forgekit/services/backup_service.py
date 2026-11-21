@@ -7,10 +7,13 @@ links, devices and ambiguous paths are rejected rather than silently skipped.
 from __future__ import annotations
 
 import bz2
+import contextlib
 import gzip
 import hashlib
+import logging
 import lzma
 import os
+import secrets
 import shutil
 import stat
 import tarfile
@@ -18,6 +21,8 @@ import tempfile
 import time
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Callable, Iterator
+
+logger = logging.getLogger(__name__)
 
 _CHUNK_SIZE = 1024 * 1024
 # Defensive limits for untrusted archives. They also bound in-memory indexes.
@@ -494,12 +499,18 @@ def _check_existing(
     return conflicts
 
 
-def _open_directory(root_fd: int, parts: tuple[str, ...]) -> int:
+def _ensure_directory(root_fd: int, parts: tuple[str, ...], created: list[tuple[str, ...]]) -> int:
+    """Open each component without following links, creating missing ones.
+
+    Every component this call creates is appended to ``created`` (outermost
+    first) so the caller can remove exactly the directories it introduced.
+    """
     fd = os.dup(root_fd)
     try:
-        for part in parts:
+        for index, part in enumerate(parts):
             try:
                 os.mkdir(part, 0o755, dir_fd=fd)
+                created.append(parts[: index + 1])
             except FileExistsError:
                 pass
             next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
@@ -511,13 +522,195 @@ def _open_directory(root_fd: int, parts: tuple[str, ...]) -> int:
         raise
 
 
+def _open_directory(root_fd: int, parts: tuple[str, ...]) -> int:
+    return _ensure_directory(root_fd, parts, [])
+
+
+def _open_existing_directory(root_fd: int, parts: tuple[str, ...]) -> int:
+    """Open an existing directory path without creating anything."""
+    fd = os.dup(root_fd)
+    try:
+        for part in parts:
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _missing_components(path: Path) -> list[tuple[str, ...]]:
+    """Return the path components that do not exist yet, outermost first."""
+    missing: list[tuple[str, ...]] = []
+    parts = path.parts[1:]
+    current = Path(path.anchor)
+    for index, part in enumerate(parts):
+        current = current / part
+        try:
+            current.lstat()
+        except FileNotFoundError:
+            missing.append(parts[: index + 1])
+        except OSError:
+            break
+    return missing
+
+
+def _remove_created_directories(anchor_fd: int, created: list[tuple[str, ...]]) -> None:
+    """Best-effort removal of directories created before a failure."""
+    for parts in reversed(created):
+        try:
+            fd = _open_existing_directory(anchor_fd, parts[:-1])
+            try:
+                os.rmdir(parts[-1], dir_fd=fd)
+            finally:
+                os.close(fd)
+        except OSError:
+            continue
+
+
+class RestoreError(ValueError):
+    """A restore failed; the destination was rolled back where possible."""
+
+    def __init__(
+        self, message: str, rolled_back: bool, rollback_errors: list[str] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.rolled_back = rolled_back
+        self.rollback_errors = rollback_errors or []
+
+
+class _RestoreTransaction:
+    """Journal destination mutations so a failed restore can be undone.
+
+    Originals replaced with ``--force`` are renamed into a private directory
+    inside the destination root.  The rename stays on one filesystem, so no
+    extra disk space is required and the original bytes and metadata are
+    preserved.  Newly created files and directories are recorded so they can
+    be removed again.  The journal is deleted on success: replacing files is
+    the explicit effect of ``--force``.
+
+    A hard kill (SIGKILL, power loss) can still leave the journal directory in
+    place; it is clearly named, never read as restore input, and contains only
+    the files that were being replaced.
+    """
+
+    def __init__(self, root_fd: int) -> None:
+        self._root_fd = root_fd
+        self.name = f".forgekit-restore-{secrets.token_hex(8)}"
+        os.mkdir(self.name, 0o700, dir_fd=root_fd)
+        self._fd = os.open(self.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+        logger.debug("restore journal created: %s", self.name)
+        self.created_dirs: list[tuple[str, ...]] = []
+        self._created_files: list[tuple[str, ...]] = []
+        self._replaced: list[tuple[tuple[str, ...], str]] = []
+        self._closed = False
+
+    @property
+    def fd(self) -> int:
+        return self._fd
+
+    @property
+    def replaced_count(self) -> int:
+        return len(self._replaced)
+
+    def ensure_directory(self, parts: tuple[str, ...]) -> int:
+        return _ensure_directory(self._root_fd, parts, self.created_dirs)
+
+    def preserve_existing(self, parts: tuple[str, ...], parent_fd: int, name: str) -> str:
+        """Move an existing regular file into the journal, returning its entry name."""
+        entry = f"{len(self._replaced):08d}"
+        os.rename(name, entry, src_dir_fd=parent_fd, dst_dir_fd=self._fd)
+        self._replaced.append((parts, entry))
+        return entry
+
+    def forget_replaced(self, parts: tuple[str, ...], entry: str) -> None:
+        with contextlib.suppress(ValueError):
+            self._replaced.remove((parts, entry))
+
+    def record_created_file(self, parts: tuple[str, ...]) -> None:
+        self._created_files.append(parts)
+
+    def commit(self) -> None:
+        """Drop preserved originals once every member was restored."""
+        for _, entry in self._replaced:
+            try:
+                os.unlink(entry, dir_fd=self._fd)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.warning("Could not remove restore journal entry %s", entry)
+        self._replaced.clear()
+
+    def rollback(self) -> dict[str, object]:
+        """Undo journaled mutations, newest first, and report the outcome."""
+        errors: list[str] = []
+        removed = restored = dirs_removed = 0
+        for parts in reversed(self._created_files):
+            try:
+                fd = _open_existing_directory(self._root_fd, parts[:-1])
+                try:
+                    os.unlink(parts[-1], dir_fd=fd)
+                    removed += 1
+                finally:
+                    os.close(fd)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                errors.append(f"could not remove {parts[-1]}: {exc}")
+        for parts, entry in reversed(self._replaced):
+            try:
+                fd = _open_existing_directory(self._root_fd, parts[:-1])
+                try:
+                    os.rename(entry, parts[-1], src_dir_fd=self._fd, dst_dir_fd=fd)
+                    restored += 1
+                finally:
+                    os.close(fd)
+            except OSError as exc:
+                errors.append(f"could not restore original {parts[-1]}: {exc}")
+        for parts in reversed(self.created_dirs):
+            try:
+                fd = _open_existing_directory(self._root_fd, parts[:-1])
+                try:
+                    os.rmdir(parts[-1], dir_fd=fd)
+                    dirs_removed += 1
+                finally:
+                    os.close(fd)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                errors.append(f"could not remove directory {parts[-1]}: {exc}")
+        self._created_files.clear()
+        self._replaced.clear()
+        return {
+            "complete": not errors,
+            "removed_files": removed,
+            "restored_files": restored,
+            "removed_directories": dirs_removed,
+            "errors": errors,
+        }
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        with contextlib.suppress(OSError):
+            os.close(self._fd)
+        with contextlib.suppress(OSError):
+            os.rmdir(self.name, dir_fd=self._root_fd)
+
+
 def _restore_file(
-    tar: tarfile.TarFile, member: tarfile.TarInfo, parent_fd: int, name: str, overwrite: bool
+    tar: tarfile.TarFile,
+    member: tarfile.TarInfo,
+    parent_fd: int,
+    name: str,
+    overwrite: bool,
+    transaction: _RestoreTransaction | None = None,
+    parts: tuple[str, ...] = (),
 ) -> None:
     # Create an unpredictable file in the destination directory, then publish it
-    # without following links. No-overwrite uses an atomic hard link.
-    import secrets
-
+    # without following links. No-overwrite publishes with an atomic hard link.
     temp_name = f".forgekit-{secrets.token_hex(16)}.partial"
     fd = os.open(
         temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent_fd
@@ -531,18 +724,33 @@ def _restore_file(
             shutil.copyfileobj(source, output, _CHUNK_SIZE)
             output.flush()
             os.fchmod(output.fileno(), member.mode & 0o777)
-        if overwrite:
-            try:
-                existing = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-                if not stat.S_ISREG(existing.st_mode):
-                    raise ValueError(f"Refusing to overwrite non-regular file: {name}")
-            except FileNotFoundError:
-                pass
-            os.replace(temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        try:
+            existing = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if not stat.S_ISREG(existing.st_mode):
+                raise ValueError(f"Refusing to overwrite non-regular file: {name}")
+            if not overwrite:
+                raise ValueError(f"Refusing to overwrite existing file: {name}")
+            if transaction is None:
+                os.replace(temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            else:
+                entry = transaction.preserve_existing(parts, parent_fd, name)
+                try:
+                    os.replace(temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                except BaseException:
+                    # Put the original back before anything else can observe
+                    # the name as missing.
+                    os.rename(entry, name, src_dir_fd=transaction.fd, dst_dir_fd=parent_fd)
+                    transaction.forget_replaced(parts, entry)
+                    raise
         else:
             os.link(
                 temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd, follow_symlinks=False
             )
+            if transaction is not None:
+                transaction.record_created_file(parts)
     finally:
         if fd >= 0:
             os.close(fd)
@@ -567,6 +775,25 @@ def _restore_plan(
         "would_overwrite": conflicts[:20],
         "conflict_count": len(conflicts),
     }
+
+
+def _extract_members(
+    tar: tarfile.TarFile,
+    members: list[tuple[tarfile.TarInfo, tuple[str, ...]]],
+    root_fd: int,
+    transaction: _RestoreTransaction,
+    overwrite: bool,
+) -> None:
+    for member, parts in members:
+        if member.isdir():
+            fd = transaction.ensure_directory(parts)
+            os.close(fd)
+        else:
+            fd = transaction.ensure_directory(parts[:-1])
+            try:
+                _restore_file(tar, member, fd, parts[-1], overwrite, transaction, parts)
+            finally:
+                os.close(fd)
 
 
 def restore_archive(
@@ -623,6 +850,11 @@ def restore_archive(
                     raise ValueError(f"Archive verification failed: {exc}") from exc
                 with _open_tar(scratch) as tar:
                     members, base = _restore_plan(tar, archive, destination)
+                    logger.debug(
+                        "restore plan: %d members, %d conflicts, journal enabled",
+                        len(members),
+                        base["conflict_count"],
+                    )
                     # Destination state could have changed while copying/verifying.
                     if base["conflict_count"] and not overwrite:
                         return {
@@ -630,26 +862,52 @@ def restore_archive(
                             "status": "needs_confirmation",
                             "message": f"{base['conflict_count']} files would be overwritten; pass --force",
                         }
+                    missing = _missing_components(destination)
                     anchor_fd = os.open(
                         destination.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
                     )
                     try:
-                        root_fd = _open_directory(anchor_fd, destination.parts[1:])
+                        try:
+                            root_fd = _open_directory(anchor_fd, destination.parts[1:])
+                        except BaseException:
+                            _remove_created_directories(anchor_fd, missing)
+                            raise
+                        try:
+                            transaction = _RestoreTransaction(root_fd)
+                            try:
+                                _extract_members(tar, members, root_fd, transaction, overwrite)
+                            except BaseException as exc:
+                                report = transaction.rollback()
+                                transaction.close()
+                                # Remove the destination root and any ancestors this
+                                # restore created, so a failed restore leaves nothing.
+                                _remove_created_directories(anchor_fd, missing)
+                                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                                    raise
+                                if report["complete"]:
+                                    detail = (
+                                        "restore aborted; the destination was rolled back to "
+                                        f"its previous state: {exc}"
+                                    )
+                                else:
+                                    detail = (
+                                        "restore aborted and rollback was incomplete "
+                                        f"({len(report['errors'])} problem(s), inspect the "
+                                        f"destination): {exc}"
+                                    )
+                                raise RestoreError(
+                                    detail,
+                                    rolled_back=bool(report["complete"]),
+                                    rollback_errors=list(report["errors"]),
+                                ) from exc
+                            else:
+                                overwritten = transaction.replaced_count
+                                transaction.commit()
+                                transaction.close()
+                        finally:
+                            os.close(root_fd)
                     finally:
                         os.close(anchor_fd)
-                    try:
-                        for member, parts in members:
-                            if member.isdir():
-                                fd = _open_directory(root_fd, parts)
-                                os.close(fd)
-                            else:
-                                fd = _open_directory(root_fd, parts[:-1])
-                                try:
-                                    _restore_file(tar, member, fd, parts[-1], overwrite)
-                                finally:
-                                    os.close(fd)
-                    finally:
-                        os.close(root_fd)
-        return {**base, "restored": len(members), "status": "restored"}
+        return {**base, "restored": len(members), "overwritten": overwritten, "status": "restored"}
     except RecursionError as exc:
         raise ValueError("Archive metadata is nested too deeply") from exc

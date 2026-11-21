@@ -29,7 +29,7 @@ def test_network_command_json_and_exit_codes(monkeypatch):
     )
     monkeypatch.setattr(
         "forgekit.commands.network.resolve_dns",
-        lambda host: DnsResult(domain=host, ipv4=["192.0.2.1"], ipv6=[]),
+        lambda host, **kwargs: DnsResult(domain=host, ipv4=["192.0.2.1"], ipv6=[]),
     )
     monkeypatch.setattr(
         "forgekit.commands.network.check_http",

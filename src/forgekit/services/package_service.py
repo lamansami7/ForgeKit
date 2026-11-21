@@ -25,7 +25,14 @@ KNOWN_MANAGERS = {
 }
 
 
-def detect_managers() -> list[dict[str, str | None]]:
+_DETECTED: list[dict[str, str | None]] | None = None
+
+
+def detect_managers(refresh: bool = False) -> list[dict[str, str | None]]:
+    """Detect supported package managers, probing each once per process."""
+    global _DETECTED
+    if _DETECTED is not None and not refresh:
+        return [dict(entry) for entry in _DETECTED]
     results: list[dict[str, str | None]] = []
     for name, info in KNOWN_MANAGERS.items():
         path = shutil.which(info["check"])
@@ -52,7 +59,8 @@ def detect_managers() -> list[dict[str, str | None]]:
                     "available": True,
                 }
             )
-    return results
+    _DETECTED = results
+    return [dict(entry) for entry in results]
 
 
 def primary_manager() -> dict[str, str | None] | None:

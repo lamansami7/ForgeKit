@@ -56,12 +56,6 @@ def _run_dashboard(refresh: float | None, as_json: bool, cfg=None) -> None:
         summary = get_system_summary()
         procs = get_processes(limit=5, sort_by="cpu") if cfg.dashboard.show_processes else []
 
-        # Build content
-
-        # Header
-        Text(" ForgeKit Dashboard ", style="bold white on cyan")
-        # We'll use tables for sections
-
         # System
         sys_table = Table(show_header=False, box=None, padding=(0, 1))
         sys_table.add_column("k", style="cyan")

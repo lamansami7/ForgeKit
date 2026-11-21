@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Linux / Python ${{ matrix.python-version }}
@@ -23,13 +27,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install editable development package
-        run: python -m pip install -e ".[dev]"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          python -m pip check
       - name: Lint and check formatting
         run: |
           ruff check src/ tests/
           ruff format --check src/ tests/
       - name: Test with coverage
+        # Coverage gate (>=90% statements) is configured in pyproject.toml.
         run: pytest --cov=forgekit --cov-report=term-missing --junitxml="$RUNNER_TEMP/forge-pytest.xml"
       - name: Annotate failing tests
         if: failure()
@@ -53,6 +63,7 @@ jobs:
       - name: Install wheel in an isolated environment and smoke-test
         run: |
           python -m venv "$RUNNER_TEMP/forge-wheel"
+          "$RUNNER_TEMP/forge-wheel/bin/python" -m pip install --upgrade pip
           "$RUNNER_TEMP/forge-wheel/bin/python" -m pip install dist/*.whl
           "$RUNNER_TEMP/forge-wheel/bin/python" -m pip check
           cd "$RUNNER_TEMP"
@@ -63,3 +74,25 @@ jobs:
           forge doctor
           forge system memory --json > "$RUNNER_TEMP/forge-memory.json"
           python -m json.tool "$RUNNER_TEMP/forge-memory.json" > /dev/null
+      - name: Install sdist in an isolated environment and smoke-test
+        run: |
+          python -m venv "$RUNNER_TEMP/forge-sdist"
+          "$RUNNER_TEMP/forge-sdist/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/forge-sdist/bin/python" -m pip install dist/*.tar.gz
+          "$RUNNER_TEMP/forge-sdist/bin/python" -m pip check
+          cd "$RUNNER_TEMP"
+          export PATH="$RUNNER_TEMP/forge-sdist/bin:$PATH"
+          forge --version
+          forge doctor
+          forge config path --json > "$RUNNER_TEMP/forge-config.json"
+          python -m json.tool "$RUNNER_TEMP/forge-config.json" > /dev/null
+      - name: Backup round trip smoke test
+        # Exercises creation, verification and a real restore outside the source tree.
+        run: |
+          export PATH="$(python -c 'import sys, os; print(os.path.join(sys.prefix, "bin"))'):$PATH"
+          mkdir -p "$RUNNER_TEMP/data/sub"
+          echo "payload" > "$RUNNER_TEMP/data/sub/file.txt"
+          forge backup create "$RUNNER_TEMP/data" "$RUNNER_TEMP/backup.tar.gz"
+          forge backup verify "$RUNNER_TEMP/backup.tar.gz"
+          forge backup restore "$RUNNER_TEMP/backup.tar.gz" "$RUNNER_TEMP/restored"
+          test "$(cat "$RUNNER_TEMP/restored/data/sub/file.txt")" = "payload"

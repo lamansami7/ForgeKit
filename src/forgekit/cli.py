@@ -22,6 +22,7 @@ from forgekit.commands.security import app as security_app
 from forgekit.commands.system import app as system_app
 from forgekit.commands.workspace import app as workspace_app
 from forgekit.constants import APP_VERSION, BANNER, BANNER_SUBTITLE
+from forgekit.logging import setup_logging
 from forgekit.output import get_console, get_err_console
 
 console = get_console()
@@ -86,12 +87,15 @@ def main(
             raise typer.Exit(1)
     effective_json = json_output or (cfg is not None and cfg.general.output_format == "json")
     ctx.obj["json"] = effective_json
-    logging.getLogger("forgekit").setLevel(
-        logging.DEBUG
-        if verbose
-        else getattr(logging, cfg.general.log_level)
-        if cfg
-        else logging.WARNING
+    # Diagnostics go to stderr so stdout stays parseable as JSON.
+    setup_logging("DEBUG" if verbose else (cfg.general.log_level if cfg else "WARNING"))
+    logging.getLogger("forgekit").debug(
+        "forgekit %s | command=%s | json=%s | config=%s | platform=%s",
+        APP_VERSION,
+        ctx.invoked_subcommand or "overview",
+        effective_json,
+        config_path or "default",
+        __import__("platform").system(),
     )
     console.no_color = (
         no_color

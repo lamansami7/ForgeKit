@@ -19,7 +19,7 @@
 
 - `forge net` — local interface and bound socket overview
 - `forge net ping HOST [-c N] [-t TIMEOUT] [--json]`
-- `forge net dns DOMAIN [--json]`
+- `forge net dns DOMAIN [--timeout N] [--json]` — resolution is bounded by a wall-clock timeout
 - `forge net check [--json] [--timeout N]` — DNS + HTTPS checks
 - `forge net ports [--json]` — listening TCP and bound UDP sockets, PID/process if permitted; results may be incomplete
 - `forge net interfaces [--json]` — IP/MAC/MTU/stats
@@ -73,7 +73,7 @@ Non-invasive, no claims of "secure".
 - `forge backup create SOURCE [DEST] [--compression gz|bz2|xz|none] [--dry-run] [--json]`
 - `forge backup list ARCHIVE [--json]`
 - `forge backup verify ARCHIVE [--sha256 DIGEST] [--json]` — structural checks and optional trusted SHA-256 comparison
-- `forge backup restore ARCHIVE DEST [--dry-run] [--force] [--json]` — overwrite protection, traversal-safe
+- `forge backup restore ARCHIVE DEST [--dry-run] [--force] [--json]` — overwrite protection, traversal-safe, journaled rollback
 
 Source files are never deleted.
 
@@ -122,10 +122,19 @@ Restore rejects absolute paths, `..`, backslashes, colons, duplicate names, symb
 links, devices, and FIFOs. It refuses to follow existing symlinks even with `--force`.
 An existing directory may be used; an existing regular file requires `--force`.
 `--force` is explicit consent to replace conflicting files. Non-interactive restores
-without conflicts do not prompt. Files are restored individually, so a later I/O error
-can leave earlier files restored; restore is **not transactional**. Ownership, timestamps,
-ACLs, extended attributes and original directory modes are not restored. Inspect the
-archive and test recovery in a separate directory before relying on it.
+without conflicts do not prompt.
+
+Restore is journaled rather than fully transactional. Each replaced file is renamed into a
+private `.forgekit-restore-<random>` directory inside the destination before the new file is
+published, and new files/directories are recorded. If any member fails (disk full, permission
+error, I/O error, Ctrl+C), the journal is replayed in reverse so the destination returns to its
+previous state; the command exits 1 with `rolled_back: true` (or `rolled_back: false` plus
+`rollback_errors` when the undo itself failed). On success the journal is deleted because
+replacing those files is the explicit effect of `--force`. A hard kill or power loss can still
+leave the journal and a partial restore behind; inspect the destination and the journal before
+retrying. Ownership, timestamps, ACLs, extended attributes and original directory modes are not
+restored, and content is not `fsync`ed. Inspect the archive and test recovery in a separate
+directory before relying on it. See [backup safety](backup-safety.md).
 
 `verify` reads file contents and compressed streams, checks tar structure and rejects
 unsafe members. A tar archive has no inherent per-file content checksums: save the
@@ -147,11 +156,18 @@ substantial CPU, time and disk; do not process untrusted archives without adequa
 resource isolation. A concurrently changing source is not a consistent snapshot—use
 a filesystem snapshot for important or active data.
 
+### Diagnostics and verbosity
+
+`--verbose`/`-v` sets the `forgekit` logger to DEBUG and writes diagnostics to stderr, so
+stdout stays parseable as JSON. Log output never appears inside JSON documents.
+
 ### Network limitations
 
 Ping uses ICMP when the system executable is available; otherwise it attempts TCP
 connections on ports 80 and 443 and labels the result `tcp`. DNS resolution is provided
-by the system resolver and has no portable hard timeout. HTTP uses TLS verification,
+by the system resolver; ForgeKit bounds each lookup with a wall-clock timeout and reports
+`DNS resolution timed out after Ns` instead of hanging, but the resolver call itself cannot
+be cancelled. HTTP uses TLS verification,
 per-socket timeouts, streaming responses and at most five redirects. These are not a
 strict end-to-end deadline for DNS or a server slowly delivering headers. Displayed URL
 userinfo and query values and common sensitive headers are redacted, but arbitrary

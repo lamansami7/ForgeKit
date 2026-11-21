@@ -137,7 +137,7 @@ def create_cmd(
     if template == "node" and (name != name.lower() or "_" in name):
         fail("Node project names must use lowercase letters, digits and hyphens")
     try:
-        parent = Path(path).expanduser().resolve()
+        parent = Path(path).expanduser().resolve(strict=True)
     except (OSError, RuntimeError) as exc:
         fail(f"Could not resolve workspace parent: {exc}")
     if not parent.is_dir():

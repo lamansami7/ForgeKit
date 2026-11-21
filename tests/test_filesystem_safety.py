@@ -284,3 +284,13 @@ def test_workspace_symlink_loop_reports_json_error(tmp_path):
     assert result.exit_code == 1
     assert "resolve" in json.loads(result.output)["error"].lower()
     assert not (tmp_path / "project").exists()
+
+
+def test_workspace_missing_parent_reports_error_without_creating_directories(tmp_path):
+    missing = tmp_path / "missing"
+    result = CliRunner().invoke(
+        app, ["workspace", "create", "project", "--path", str(missing), "--json"]
+    )
+    assert result.exit_code == 1
+    assert "resolve" in json.loads(result.output)["error"].lower()
+    assert not missing.exists()
